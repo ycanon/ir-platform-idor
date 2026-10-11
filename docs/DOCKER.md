@@ -32,7 +32,18 @@ Equipo anfitrión (Linux, macOS o Windows)
 - **Memoria**: analizar ~4,5 M filas necesita 3–4 GB para el contenedor. En Docker Desktop, ajústelo en
   *Settings → Resources* (en Windows con WSL2, en `%UserProfile%\.wslconfig`: `[wsl2]` / `memory=6GB`).
 
-## 2. Configurar
+## 2. Obtener el código y configurar
+
+```bash
+git clone https://github.com/ycanon/ir-platform-idor.git
+cd ir-platform-idor
+```
+
+Todos los comandos de esta guía se ejecutan desde esa carpeta (la que contiene `docker-compose.yml`).
+
+**Datos:** los logs no están en el repositorio (`data/` y `output/` no se versionan porque contienen credenciales y
+datos personales). Copie el CSV a `./data` (por ejemplo, `scp three_months.zip usuario@servidor:~/ir-platform-idor/data/`
+y luego `unzip`) o cárguelo desde la interfaz con su acta de cadena de custodia.
 
 ```bash
 cp .env.example .env                 # Windows (PowerShell): Copy-Item .env.example .env
