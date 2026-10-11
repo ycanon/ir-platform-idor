@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: ir-platform
+    folder: IR Platform
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

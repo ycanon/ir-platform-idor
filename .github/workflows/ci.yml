@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, tipos y pruebas (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Instalar
+        run: pip install -e ".[dev]"
+      - name: Ruff (estilo)
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+      - name: Mypy (tipos)
+        run: mypy
+      - name: Pytest
+        run: pytest
+
+  docker:
+    name: Imagen Docker y Compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar docker-compose.yml
+        run: |
+          docker compose config -q
+          IRP_METRICS_TOKEN=ci GRAFANA_ADMIN_PASSWORD=ci docker compose --profile observabilidad --profile ollama config -q
+      - name: Construir imagen
+        run: docker build -t ir-platform:ci .
+      - name: Prueba de humo (healthcheck)
+        run: |
+          mkdir -p data output && sudo chown -R 10001:10001 data output
+          docker run -d --name irp -p 127.0.0.1:8000:8000 -v "$PWD/data:/data" -v "$PWD/output:/output" \
+            --read-only --tmpfs /tmp:uid=10001,gid=10001,mode=0700 --tmpfs /home/irp:uid=10001,gid=10001,mode=0700 \
+            --cap-drop ALL --security-opt no-new-privileges:true ir-platform:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/api/health && exit 0; sleep 2; done
+          docker logs irp; exit 1

@@ -1,0 +1,44 @@
+# --- Secretos y configuración local ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# --- Datos y evidencias: contienen tokens y datos personales, nunca se versionan ---
+data/*
+!data/README.md
+output/*
+!output/.gitkeep
+*.csv
+!tests/fixtures/*.csv
+*.parquet
+
+# --- Entregables y material de trabajo (se gestionan fuera del repositorio) ---
+docs/entregables/
+entregables/
+_reference/
+*.docx
+*.pptx
+*.pdf
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# --- Editores y sistema operativo ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

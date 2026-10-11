@@ -1,0 +1,35 @@
+# Nada de datos, evidencias ni secretos dentro de la imagen.
+data/
+output/
+_reference/
+.env
+.env.*
+*.key
+*.pem
+*.csv
+*.parquet
+
+# Entornos y cachés locales
+.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Control de versiones, CI y editores
+.git/
+.github/
+.gitignore
+.vscode/
+.idea/
+
+# No necesarios para ejecutar
+tests/
+docs/
+observability/
+*.md
+!README.md

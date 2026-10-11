@@ -1,0 +1,18 @@
+# Prometheus — perfil "observabilidad" de docker-compose.yml.
+# Lee /metrics de la plataforma por la red interna de Compose con un token de SOLO LECTURA (IRP_METRICS_TOKEN),
+# montado como secreto en /run/secrets/metrics_token (no aparece en este archivo ni en la configuración del contenedor).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ir-platform
+    metrics_path: /metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+    static_configs:
+      - targets: ["irp:8000"]
+        labels:
+          app: ir-platform

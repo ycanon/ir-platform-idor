@@ -1,0 +1,135 @@
+# IR Platform — despliegue con Docker Compose.
+#
+#   docker compose up -d --build                              # solo la plataforma  → http://127.0.0.1:8000
+#   docker compose --profile ollama up -d --build             # + Ollama en un contenedor (LLM local)
+#   docker compose --profile observabilidad up -d --build     # + Prometheus (:9090) y Grafana (:3000)
+#
+# El LLM es opcional (sin él, los agentes usan su lógica determinista). Por defecto la plataforma busca Ollama en el
+# propio equipo (host.docker.internal:11434); con el perfil "ollama" defina IRP_OLLAMA_BASE_URL=http://ollama:11434.
+# Servicios externos (Ollama en otro servidor, MISP, APIs de TI) se alcanzan por la red como desde el equipo.
+# Configuración: copie .env.example a .env (no se versiona). Las claves de TI/LLM se recomiendan por la UI (memoria).
+# Todos los puertos se publican SOLO en 127.0.0.1 del equipo: nada queda expuesto a la red sin decisión explícita.
+
+name: ir-platform
+
+services:
+  irp:
+    build:
+      context: .
+      args:
+        # Imagen base fijada por versión. Puede reemplazarse por un espejo interno (registro corporativo).
+        PYTHON_IMAGE: ${IRP_PYTHON_IMAGE:-python:3.12-slim-bookworm}
+    image: ir-platform:0.13.0
+    container_name: irp
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Rutas DENTRO del contenedor (prevalecen sobre IRP_DATA_DIR/IRP_OUTPUT_DIR del .env, pensadas para el venv).
+      IRP_DATA_DIR: /data
+      IRP_OUTPUT_DIR: /output
+      # Ollama: el valor de .env si existe; si no, el Ollama del propio equipo. "localhost" no sirve dentro del contenedor.
+      IRP_OLLAMA_BASE_URL: ${IRP_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      # Permite alcanzar servicios del propio equipo (p. ej. Ollama) en Linux; Docker Desktop ya lo resuelve.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${IRP_PORT:-8000}:8000"
+    volumes:
+      # Datasets (entrada) y evidencias/reportes (salida). Ambos quedan en el equipo, fuera de la imagen y de Git.
+      - ./data:/data
+      - ./output:/output
+    # Endurecimiento (OWASP Docker Security Cheat Sheet, reglas #3, #4, #8):
+    user: "${IRP_UID:-10001}:${IRP_GID:-10001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,uid=${IRP_UID:-10001},gid=${IRP_GID:-10001},mode=0700
+      - /home/irp:size=64m,uid=${IRP_UID:-10001},gid=${IRP_GID:-10001},mode=0700
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    restart: unless-stopped
+    # Si su MISP usa un nombre que solo resuelve el archivo hosts del equipo, agréguelo a extra_hosts (arriba), p. ej.:
+    #   - "misp.example.internal:10.0.0.70"
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # ------------------------------------------------------------------ perfil opcional: ollama
+  # LLM local en un contenedor, sin puertos publicados (solo lo usa la plataforma por la red interna).
+  # Tras levantarlo, descargue el modelo:  docker compose exec ollama ollama pull qwen3:4b-instruct-2507-q4_K_M
+  # GPU NVIDIA (opcional): agregue "deploy.resources.reservations.devices" según la documentación de Docker.
+  ollama:
+    profiles: [ollama]
+    # Fije una versión concreta (ollama/ollama:<versión>) en entornos productivos.
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: irp-ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ perfil opcional: observabilidad
+  prometheus:
+    profiles: [observabilidad]
+    image: prom/prometheus:v3.1.0
+    container_name: irp-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    secrets:
+      - metrics_token
+    depends_on: [irp]
+    # Sin read_only: Compose copia los secretos tomados del entorno dentro del contenedor al crearlo.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  grafana:
+    profiles: [observabilidad]
+    image: grafana/grafana-oss:11.4.0
+    container_name: irp-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    secrets:
+      - grafana_admin_password
+    depends_on: [prometheus]
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+# Secretos tomados del .env/entorno y montados como archivo en /run/secrets (no quedan en `docker inspect`).
+secrets:
+  metrics_token:
+    environment: IRP_METRICS_TOKEN
+  grafana_admin_password:
+    environment: GRAFANA_ADMIN_PASSWORD
+
+volumes:
+  ollama-models:
+  prometheus-data:
+  grafana-data:

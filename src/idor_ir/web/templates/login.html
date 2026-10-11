@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IR Platform · Acceso</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+  <form class="card login" method="post" action="/login" autocomplete="off">
+    <h1>◆ IR Platform</h1>
+    <p class="muted">Ingrese el token de acceso configurado en <code>IRP_ACCESS_TOKEN</code>.</p>
+    <input name="access_token" type="password" required maxlength="256" aria-label="Token de acceso">
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <button class="btn" type="submit">Entrar</button>
+  </form>
+</body>
+</html>

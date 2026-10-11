@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idor-ir"
+version = "0.13.0"
+description = "Investigación forense y respuesta automatizada ante incidentes IDOR, con agentes de GenAI y servidor MCP de inteligencia de amenazas"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yeyson Javier Cañón Forero" }]
+keywords = ["incident-response", "idor", "bola", "dfir", "langgraph", "mcp", "threat-intelligence", "nist"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "polars>=1.30,<2",            # ingesta streaming
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "scikit-learn>=1.5,<2",       # Isolation Forest
+    "langgraph>=1.0,<2",          # orquestación multiagente (MIT)
+    "langchain-ollama>=1.0,<2",   # cliente Ollama con salida estructurada
+    "httpx>=0.27,<1",             # health-check de Ollama (y APIs externas en fases posteriores)
+    "fastapi>=0.115,<1",          # web
+    "uvicorn[standard]>=0.30,<1",
+    "jinja2>=3.1,<4",
+    "python-multipart>=0.0.18,<1", # formulario de login (FastAPI Form); >=0.0.18 corrige CVE-2024-53981
+    "prometheus-client>=0.20,<1", # observabilidad (/metrics)
+    # Servidor MCP ti-gateway. Rama 1.x: langchain-mcp-adapters (LangGraph) exige mcp<2; 1.x recibe parches.
+    "mcp>=1.28,<2",
+    # TLS con el almacén de certificados del sistema (CA corporativa, MISP interno, proxy con inspección TLS).
+    "truststore>=0.9,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+idor-ir = "idor_ir.cli:main"
+ti-gateway = "ti_gateway.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+idor_ir = ["web/templates/*.html", "web/static/*.css", "web/static/*.js", "web/static/vendor/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: errores básicos, I: orden de imports, B: bugs comunes, UP: sintaxis moderna, S: reglas de seguridad (bandit)
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "E501"]  # assert es válido en tests; filas CSV de ejemplo largas
+"src/idor_ir/agents/fallback.py" = ["E501"]  # textos explicativos en español
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["sklearn.*"]
+ignore_missing_imports = true  # scikit-learn no publica type stubs

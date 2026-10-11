@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>IR Platform · IDOR</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ version }}">
+  <script src="/static/vendor/chart.umd.min.js" defer></script>
+  <script src="/static/app.js?v={{ version }}" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">◆ IR Platform <span class="muted">· Investigación IDOR</span></div>
+  <div class="topbar-right">
+    <span id="llm-status" class="pill">LLM: comprobando…</span>
+    <label class="run-select">Run
+      <select id="run-select" aria-label="Seleccionar ejecución"></select>
+    </label>
+    {% if auth %}<button id="logout" class="btn ghost small" type="button">Salir</button>{% endif %}
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="dataset" role="tab">1 · Dataset</button>
+  <button class="tab" data-tab="investigation" role="tab">2 · Investigación</button>
+  <button class="tab" data-tab="evidence" role="tab">3 · Evidencia</button>
+  <button class="tab" data-tab="agents" role="tab">4 · Agentes y respuesta</button>
+  <button class="tab" data-tab="chat" role="tab">5 · Conversación</button>
+  <button class="tab" data-tab="config" role="tab">6 · Configuración</button>
+</nav>
+
+<main>
+  <!-- 1 · DATASET -->
+  <section id="tab-dataset" class="panel active">
+    <div class="grid two">
+      <div class="card">
+        <h2>Datasets disponibles</h2>
+        <p class="muted">Archivos CSV en <code>data/</code> y cargas previas. Solo se aceptan rutas de esta lista.</p>
+        <div id="dataset-list" class="list"></div>
+      </div>
+      <div class="card">
+        <h2>Cargar un CSV</h2>
+        <p class="muted">CSV con los 8 campos del log HTTP (timestamp, http_status, http_host, http_uri, http_method,
+          http_referer, http_user_agent, source_ip). Límite: <span id="upload-limit">—</span> MB. Para archivos
+          grandes es más rápido copiarlos a <code>data/</code>.</p>
+        <input id="upload-input" type="file" accept=".csv">
+        <form id="custody-form" class="form custody" autocomplete="off" novalidate>
+          <h3>Cadena de custodia · acta de recepción</h3>
+          <p class="muted small">Datos que la plataforma no puede obtener del archivo. Nombre original, tamaño,
+            SHA-256 y fecha de recepción (UTC) se registran automáticamente; el archivo queda en
+            <strong>solo lectura</strong> y el análisis únicamente lo lee.</p>
+          <div class="custody-grid">
+            <label>Recolectado por (nombre y rol) *
+              <input id="cu-collected_by" type="text" maxlength="120" required placeholder="Ana Pérez · Analista SOC"></label>
+            <label>Fecha y hora de la recolección *
+              <input id="cu-collected_at" type="datetime-local" required></label>
+            <label>Sistema de origen *
+              <input id="cu-source_system" type="text" maxlength="160" required placeholder="API Gateway / WAF · producción"></label>
+            <label>Zona horaria de los timestamps del log *
+              <select id="cu-source_timezone" required>
+                <option value="">— seleccione —</option>
+                <option>UTC</option>
+                <option>UTC-03:00 (Buenos Aires / São Paulo)</option>
+                <option>UTC-05:00 (Bogotá)</option>
+                <option>UTC-06:00 (Ciudad de México)</option>
+                <option>Desconocida (pendiente de confirmar con el dueño del sistema)</option>
+              </select></label>
+            <label>Caso / ticket del incidente
+              <input id="cu-case_id" type="text" maxlength="80" placeholder="INC-2026-0142"></label>
+            <label>ID de la evidencia <span class="muted small">(vacío = se genera)</span>
+              <input id="cu-evidence_id" type="text" maxlength="80" placeholder="EV-001"></label>
+            <label>Método de extracción
+              <input id="cu-collection_method" type="text" maxlength="240" placeholder="Export de la consulta X del SIEM"></label>
+            <label>Autorización / base legal
+              <input id="cu-authorization" type="text" maxlength="240" placeholder="Aprobación CISO · ticket SEC-881"></label>
+            <label>Recibido por (custodio actual)
+              <input id="cu-received_by" type="text" maxlength="120"></label>
+            <label>SHA-256 calculado en el origen <span class="muted small">(se compara)</span>
+              <input id="cu-source_sha256" type="text" maxlength="64" class="mono" placeholder="64 caracteres hexadecimales"></label>
+          </div>
+          <label>Descripción de la evidencia
+            <textarea id="cu-description" maxlength="600" rows="2"></textarea></label>
+          <label>Observaciones
+            <textarea id="cu-notes" maxlength="1000" rows="2"></textarea></label>
+        </form>
+        <div class="row">
+          <button id="upload-btn" class="btn" type="button">Subir</button>
+          <progress id="upload-progress" max="100" value="0" hidden></progress>
+        </div>
+        <p id="upload-msg" class="muted"></p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row space">
+        <h2>Análisis</h2>
+        <button id="analyze-btn" class="btn" type="button" disabled>Analizar dataset seleccionado</button>
+      </div>
+      <p class="muted small">El endpoint afectado, los parámetros (ID del objeto, credencial y ámbito) y el nombre de
+        los objetos expuestos se <strong>detectan automáticamente del dataset</strong>; no hay que indicarlos.</p>
+      <div class="row detection-row">
+        <label>Fecha de detección del incidente <span class="muted small">(opcional)</span>
+          <input id="pf-detection_date" type="date"></label>
+        <span class="muted small">Si se deja vacía, el TTD se <em>estima</em> hasta el último registro del log.</span>
+      </div>
+      <div id="profile-detected" class="profile-detected" hidden></div>
+      <details id="profile-box" class="profile-box">
+        <summary>Ajustar el perfil manualmente (opcional)</summary>
+        <label class="check"><input id="pf-manual" type="checkbox"> Usar estos valores en lugar de la detección
+          automática en el próximo análisis</label>
+        <form id="profile-form" class="profile-grid" autocomplete="off">
+          <label>Endpoint
+            <input id="pf-target_endpoint" type="text" maxlength="200" spellcheck="false" list="pf-endpoints"></label>
+          <datalist id="pf-endpoints"></datalist>
+          <label>Parámetro del ID de objeto
+            <input id="pf-object_param" type="text" maxlength="40" spellcheck="false"></label>
+          <label>Parámetro de ámbito/tenant (vacío si no hay)
+            <input id="pf-scope_param" type="text" maxlength="40" spellcheck="false"></label>
+          <label>Parámetro de la credencial
+            <input id="pf-token_param" type="text" maxlength="40" spellcheck="false"></label>
+          <label>Objeto (singular)
+            <input id="pf-object_label" type="text" maxlength="30"></label>
+          <label>Objeto (plural)
+            <input id="pf-object_label_plural" type="text" maxlength="30"></label>
+          <label>Nombre del ámbito
+            <input id="pf-scope_label" type="text" maxlength="30"></label>
+        </form>
+        <p class="muted small">Los campos se precargan con lo detectado en el run seleccionado. Útil para analizar otro
+          endpoint candidato o corregir un parámetro; el cambio queda registrado en el manifiesto del run.</p>
+      </details>
+      <ol id="analysis-steps" class="steps"></ol>
+    </div>
+    <div class="card">
+      <h2>Ejecuciones</h2>
+      <div class="table-wrap"><table id="runs-table"><thead><tr>
+        <th>Run</th><th>Fecha (UTC)</th><th>Archivo</th><th>SHA-256</th><th>Evidencia</th><th>Agentes</th><th></th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- 2 · INVESTIGACIÓN -->
+  <section id="tab-investigation" class="panel">
+    <div class="row downloads-row"><span class="muted small">Descargar datos de la investigación:</span>
+      <a id="dl-metrics" class="btn ghost small" href="#">metrics.json</a>
+      <a id="dl-detection" class="btn ghost small" href="#">detection.json</a></div>
+    <div id="kpis" class="kpis"></div>
+    <div class="grid two">
+      <div class="card"><h2>Peticiones de ataque por día</h2>
+        <p class="muted">Tráfico atribuido a cada campaña (UA de herramienta desde IPs sospechosas).</p>
+        <div class="chart"><canvas id="chart-attack"></canvas></div></div>
+      <div class="card"><h2>Tráfico total por día</h2>
+        <p class="muted">Todas las peticiones a <span id="total-endpoint" class="mono">—</span>.</p>
+        <div class="chart"><canvas id="chart-total"></canvas></div></div>
+    </div>
+    <div class="grid two">
+      <div class="card"><h2>Distribución de códigos HTTP</h2>
+        <div class="chart"><canvas id="chart-status"></canvas></div>
+        <p id="error-rates" class="muted"></p></div>
+      <div class="card"><h2>Tokens (authtoken)</h2>
+        <div class="table-wrap"><table id="tokens-table"></table></div></div>
+    </div>
+    <div class="card"><h2>IPs con mayor riesgo</h2>
+      <div class="table-wrap"><table id="ips-table"></table></div></div>
+  </section>
+
+  <!-- 3 · EVIDENCIA -->
+  <section id="tab-evidence" class="panel">
+    <div class="card">
+      <div class="row space">
+        <h2>Integridad y descargas</h2>
+        <div class="row">
+          <button id="verify-btn" class="btn ghost" type="button">Verificar integridad</button>
+          <a id="dl-evidence" class="btn ghost" href="#">evidence.json</a>
+          <a id="dl-iocs" class="btn ghost" href="#">iocs.csv</a>
+          <a id="dl-manifest" class="btn ghost" href="#">manifest.json</a>
+          <a id="dl-custody" class="btn ghost" href="#" hidden>custody_intake.json</a>
+        </div>
+      </div>
+      <div id="custody-intake" class="custody-intake" hidden></div>
+      <p id="integrity" class="muted"></p>
+      <ul id="verify-results" class="checks"></ul>
+    </div>
+    <div class="card"><h2>Respuestas del análisis (NIST · sección 3.1)</h2><div id="answers" class="answers"></div></div>
+    <div class="card"><h2>Campañas</h2><div id="campaigns" class="grid two"></div></div>
+    <div class="grid two">
+      <div class="card"><h2>Timeline</h2><ol id="timeline" class="timeline"></ol></div>
+      <div class="card"><h2>IOCs</h2><div id="iocs"></div></div>
+    </div>
+    <div class="card"><h2>Top 20 IPs con evidencia</h2><div class="table-wrap"><table id="top20-table"></table></div></div>
+    <div class="card">
+      <div class="row space">
+        <h2>Inteligencia de amenazas · IPs públicas del Top 20</h2>
+        <div class="row">
+          <button id="ti-run" class="btn" type="button">Enriquecer</button>
+          <a id="dl-ti" class="btn ghost small" href="#" hidden>ti_enrichment.json</a>
+        </div>
+      </div>
+      <p class="muted small">Consultas a través del servidor MCP <code>ti-gateway</code>. Fuentes:</p>
+      <div id="ti-sources-pick" class="row"></div>
+      <p id="ti-sources-hint" class="muted small"></p>
+      <div class="consent">
+        <label class="check"><input id="ti-consent" type="checkbox">
+          <span>Autorizo enviar a las fuentes seleccionadas solo las <strong>IPs públicas</strong> del Top 20 (sin tokens
+            ni logs). VirusTotal agrega todo indicador consultado a su dataset público. La autorización queda en el
+            reporte y en la cadena de custodia.</span></label>
+      </div>
+      <p id="ti-progress" class="muted"></p>
+      <p id="ti-caveat" class="warn-text" hidden></p>
+      <div id="ti-summary" class="kpis" hidden></div>
+      <div class="table-wrap"><table id="ti-table"></table></div>
+    </div>
+  </section>
+
+  <!-- 4 · AGENTES -->
+  <section id="tab-agents" class="panel">
+    <div class="card">
+      <div class="row space">
+        <h2>Flujo multiagente (LangGraph)</h2>
+        <div class="row">
+          <label class="check"><input id="use-llm" type="checkbox" checked> Usar LLM: <span id="agents-llm">—</span></label>
+          <button id="agents-btn" class="btn" type="button">Ejecutar agentes</button>
+        </div>
+      </div>
+      <div id="consent-box" class="consent" hidden>
+        <label class="check"><input id="cloud-consent" type="checkbox">
+          <span>Autorizo enviar a <strong id="consent-provider"></strong> (fuera de la red local) el contexto agregado del
+            incidente: conteos, IPs atacantes, user agents, rangos de IDs de objeto y pistas enmascaradas de tokens. Nunca se
+            envían los logs crudos ni los tokens completos. La autorización queda registrada en el reporte y en la
+            cadena de custodia.</span></label>
+      </div>
+      <ol id="agent-stepper" class="stepper"></ol>
+      <div id="approval-box" class="approval" hidden>
+        <h3>Aprobación humana requerida (dry-run)</h3>
+        <div id="approval-list"></div>
+        <div class="row">
+          <button id="approve-all" class="btn ghost small" type="button">Marcar todas: aprobar</button>
+          <button id="reject-all" class="btn ghost small" type="button">Marcar todas: rechazar</button>
+          <button id="submit-approvals" class="btn" type="button">Enviar decisiones</button>
+        </div>
+      </div>
+      <p id="agents-msg" class="muted"></p>
+    </div>
+    <div id="agents-result" class="grid three"></div>
+    <div class="card"><h2>Acciones de contención</h2><div class="table-wrap"><table id="actions-table"></table></div></div>
+    <div class="grid two">
+      <div class="card"><h2>Mini-playbook</h2><ol id="playbook"></ol>
+        <p class="row"><a id="dl-playbook" class="btn ghost small" href="#">playbook.md</a>
+          <a id="dl-agents" class="btn ghost small" href="#">agents_report.json</a></p></div>
+      <div class="card"><h2>Tiempos de respuesta</h2><div id="times"></div></div>
+    </div>
+    <div class="card"><h2>Decision log</h2><div class="table-wrap"><table id="decision-table"></table></div>
+      <a id="dl-log" class="btn ghost small" href="#">decision_log.jsonl</a></div>
+    <div class="card">
+      <h2>Evaluación del modelo local</h2>
+      <p class="muted small">Banco de ~15 preguntas con los hechos esperados de la evidencia de este run, más el flujo de
+        agentes en una carpeta temporal (no reemplaza el resultado de arriba). Mide hechos presentes, fechas e IPs
+        correctas, listas completas, tácticas MITRE y tiempo. Varios modelos separados por coma se comparan en la tabla.
+        Siempre usa el Ollama local; en CPU puede tardar 15–25 min por modelo.</p>
+      <div class="row">
+        <label>Modelos <input id="eval-models" type="text" maxlength="300" spellcheck="false" list="llm-models"
+          placeholder="qwen3:4b-instruct-2507-q4_K_M, qwen3:8b" class="wide-input"></label>
+        <label class="check"><input id="eval-agents" type="checkbox" checked> agentes</label>
+        <label class="check"><input id="eval-chat" type="checkbox" checked> chat</label>
+        <label>Preguntas <input id="eval-limit" type="number" min="1" max="30" placeholder="todas" class="narrow-input"></label>
+        <button id="eval-btn" class="btn" type="button">Evaluar</button>
+      </div>
+      <p id="eval-progress" class="muted small"></p>
+      <div class="table-wrap"><table id="eval-table"></table></div>
+      <div id="eval-detail"></div>
+    </div>
+  </section>
+
+  <!-- 5 · CONFIGURACIÓN -->
+  <!-- 5 · CONVERSACIÓN -->
+  <section id="tab-chat" class="panel">
+    <div class="chat-layout">
+      <aside class="card chat-agents">
+        <h2>Agentes</h2>
+        <p class="muted small">Cada agente responde solo con la evidencia de este run y su última salida. No ejecuta
+          acciones: lo que proponga pasa por la aprobación humana de la pestaña Agentes.</p>
+        <div id="chat-agent-list" class="list"></div>
+        <p id="chat-llm" class="muted small"></p>
+      </aside>
+      <div class="card chat-main">
+        <div class="row space">
+          <h2 id="chat-title">Conversación</h2>
+          <div class="row">
+            <a id="dl-chat" class="btn ghost small" href="#">transcripción .jsonl</a>
+            <button id="chat-new" class="btn ghost small" type="button">Nueva conversación</button>
+          </div>
+        </div>
+        <p id="chat-note" class="warn-text" hidden></p>
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
+        <div id="chat-suggestions" class="row chat-suggestions"></div>
+        <div id="chat-consent-box" class="consent" hidden>
+          <label class="check"><input id="chat-consent" type="checkbox">
+            <span>Autorizo enviar a <strong id="chat-consent-provider"></strong> (fuera de la red local) el contexto agregado
+              del incidente y mis preguntas. Nunca se envían logs crudos ni tokens completos.</span></label>
+        </div>
+        <form id="chat-form" class="chat-form" autocomplete="off">
+          <textarea id="chat-input" rows="2" maxlength="2000" placeholder="Pregunte al agente sobre la evidencia…"
+            aria-label="Pregunta para el agente"></textarea>
+          <button id="chat-send" class="btn" type="submit">Enviar</button>
+        </form>
+        <p class="muted small">Enter envía · Shift+Enter nueva línea · Cada turno queda guardado en el run con hash y en la
+          cadena de custodia.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-config" class="panel">
+    <div class="grid two">
+      <div class="card">
+        <h2>Modelo de lenguaje para los agentes</h2>
+        <p class="muted">Ollama en la LAN o una API comercial. Las API keys se guardan solo en la memoria del servidor
+          (se pierden al reiniciarlo), nunca se devuelven al navegador y no se escriben en logs.</p>
+        <form id="llm-form" class="form" autocomplete="off">
+          <label>Proveedor
+            <select id="llm-provider" aria-label="Proveedor LLM"></select></label>
+          <p id="llm-help" class="muted small"></p>
+          <label>URL del servidor
+            <input id="llm-url" type="text" maxlength="300" spellcheck="false"></label>
+          <label id="llm-key-row">API key <span id="llm-key-state" class="muted small"></span>
+            <span class="row nowrap">
+              <input id="llm-key" type="password" maxlength="512" spellcheck="false" autocomplete="new-password"
+                placeholder="Pegue la clave (no se mostrará de nuevo)">
+              <button id="llm-key-clear" class="btn ghost small" type="button">Olvidar</button>
+            </span></label>
+          <div class="row">
+            <button id="llm-save" class="btn ghost" type="submit">Guardar</button>
+            <button id="llm-list" class="btn ghost" type="button">Listar modelos</button>
+          </div>
+          <label>Modelo <span id="llm-models-count" class="muted small"></span>
+            <input id="llm-model" type="text" list="llm-models" maxlength="120" spellcheck="false"
+              placeholder="Escriba o elija de la lista"></label>
+          <datalist id="llm-models"></datalist>
+          <p id="llm-cloud-warn" class="warn-text" hidden>Proveedor fuera de la red local: antes de ejecutar los agentes
+            se pedirá autorización para enviar el contexto agregado del incidente.</p>
+          <div class="row">
+            <button id="llm-activate" class="btn" type="button">Usar para los agentes</button>
+            <button id="llm-test" class="btn ghost" type="button">Probar</button>
+            <span id="llm-active" class="muted small"></span>
+          </div>
+        </form>
+        <ul id="llm-results" class="checks"></ul>
+        <hr class="sep">
+        <h3>Modelo para la conversación</h3>
+        <p class="muted small">El chat con los agentes puede usar el mismo proveedor y modelo de los agentes u otros
+          distintos (p. ej. agentes con un modelo local más capaz y chat con uno más rápido, o chat con una API en la
+          nube). Si el proveedor necesita API key o URL, ingréselas aquí: se guardan para ese proveedor (solo en memoria)
+          y también se ven en el formulario de arriba.</p>
+        <form id="chatllm-form" class="form" autocomplete="off">
+          <label>Proveedor
+            <select id="chatllm-provider" aria-label="Proveedor de la conversación"></select></label>
+          <p id="chatllm-help" class="muted small"></p>
+          <label id="chatllm-url-row" hidden>URL del servidor
+            <input id="chatllm-url" type="text" maxlength="300" spellcheck="false"></label>
+          <label id="chatllm-key-row" hidden>API key <span id="chatllm-key-state" class="muted small"></span>
+            <input id="chatllm-key" type="password" maxlength="512" spellcheck="false" autocomplete="new-password"
+              placeholder="Pegue la clave (no se mostrará de nuevo)"></label>
+          <label>Modelo <span id="chatllm-count" class="muted small"></span>
+            <input id="chatllm-model" type="text" list="chatllm-models" maxlength="120" spellcheck="false"
+              placeholder="Vacío = el modelo configurado en ese proveedor"></label>
+          <datalist id="chatllm-models"></datalist>
+          <div class="row">
+            <button id="chatllm-save" class="btn" type="submit">Usar para la conversación</button>
+            <button id="chatllm-list" class="btn ghost" type="button">Listar modelos</button>
+            <button id="chatllm-test" class="btn ghost" type="button">Probar</button>
+          </div>
+          <p id="chatllm-state" class="muted small"></p>
+        </form>
+        <ul id="chatllm-results" class="checks"></ul>
+      </div>
+      <div class="card">
+        <h2>Parámetros del análisis</h2>
+        <p class="muted small">El perfil del incidente se detecta del dataset en cada análisis; los valores "de respaldo"
+          solo se usan si no se detecta ningún endpoint con ID de objeto.</p>
+        <dl id="analysis-config" class="kv"></dl>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Inteligencia de amenazas · servidor MCP ti-gateway</h2>
+      <p class="muted">Las fuentes las define el servidor MCP <code>ti-gateway</code>; aquí se configuran sus claves (solo en
+        memoria, o desde <code>TI_&lt;ID&gt;_API_KEY</code>; <strong>MISP</strong> pide además la URL de su instancia, interna o externa, en la columna Conexión, o
+        <code>TI_MISP_URL</code>) y sus límites. Cada consulta lanza el gateway solo con las claves
+        necesarias. Revise los términos de cada fuente: varias limitan el uso comercial.</p>
+      <form id="ti-form" autocomplete="off">
+        <div class="table-wrap"><table id="ti-sources-table"></table></div>
+        <div class="row"><button id="ti-save" class="btn ghost" type="submit">Guardar cambios</button>
+          <span class="muted small">Las claves se envían una vez y quedan solo en memoria del servidor.</span></div>
+      </form>
+      <ul id="ti-results" class="checks"></ul>
+    </div>
+  </section>
+</main>
+<footer class="muted">IR Platform v{{ version }} · Los logs crudos y los tokens completos nunca salen de este equipo;
+  los agentes reciben solo el contexto agregado del incidente.</footer>
+</body>
+</html>
