@@ -6,7 +6,7 @@
 
 Plataforma para **detectar y analizar la explotación de un IDOR** (*Insecure Direct Object Reference*, BOLA en el
 OWASP API Top 10) a partir de logs HTTP, **generar evidencia forense verificable** y **automatizar parcialmente la
-respuesta inicial** con agentes de GenAI y aprobación humana, siguiendo el ciclo de respuesta a incidentes de NIST
+respuesta inicial** con agentes de GenAI y aprobación humana, siguiendo el ciclo de respuesta a incidentes de NIST.
 
 Caso de referencia: `GET /invoices/search?invoice_id={id}&site_id={id}&authtoken={token}`, ~4,5 millones de registros
 (1,1 GB). La plataforma no está atada a ese endpoint: **detecta del propio dataset** el endpoint, el parámetro con el ID
