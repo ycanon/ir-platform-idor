@@ -110,7 +110,7 @@ def test_all_authenticated_yields_affirmative_authorization_fact(tmp_path: Path,
     assert camp["impact"]["success_2xx_without_token"] == 0
     assert camp["impact"]["success_2xx_with_token"] == camp["impact"]["success_responses_2xx"] > 0
     facts = " ".join(verified_facts(ev))
-    assert "AUTENTICADO" in facts and "AUTORIZACIÓN" in facts
+    assert "AUTORIZACIÓN" in facts and "ownership" in facts  # posible falla de autorización, a verificar
     assert "sin autenticación" not in facts.lower() and "SIN authtoken" not in facts
 
 
@@ -133,7 +133,7 @@ def test_other_endpoint_and_labels_flow_through(tmp_path: Path, settings: Settin
     inference = ev["metadata"]["profile_inference"]
     assert inference["detected"] and inference["confidence"] == "alta" and len(inference["evidence"]) >= 3
     camp = ev["campaigns"][0]
-    assert camp["status"] == "confirmada" and camp["impact"]["unique_invoices_2xx"] == 900
+    assert camp["status"] == "alta_confianza" and camp["impact"]["unique_invoices_2xx"] == 900
     blob = _values(ev)
     assert "/invoices/search" not in blob and "factura" not in blob
     assert "pedidos" in blob and "order_id" in blob
@@ -147,7 +147,7 @@ def test_other_endpoint_and_labels_flow_through(tmp_path: Path, settings: Settin
     assert "/invoices/search" not in text and "factura" not in text and "authtoken" not in text
     assert "/orders/search" in text and "pedidos" in text
 
-    camps = [c for c in ev["campaigns"] if c["status"] == "confirmada"]
+    camps = [c for c in ev["campaigns"] if c["status"] == "alta_confianza"]
     for kind in ("rate_limit", "waf_rule", "monitoring"):
         action = ResponseAction(
             action_id="A1", action_type=kind, target="x", priority=1, phase="inmediata", rationale="r",

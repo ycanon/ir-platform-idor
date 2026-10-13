@@ -54,6 +54,25 @@ async function api(path, options = {}) {
 function levelTag(level) {
   return el("span", { class: `level ${level}` }, LEVEL_ICON[level] || "", " ", level);
 }
+/* Escala de evidencia: señal → hipótesis → corroboración → impacto confirmado (forensics/assessment.py).
+   "confirmada" es el estado de runs antiguos y se lee como hipótesis de alta confianza. */
+const PRIORITY_STATUSES = ["corroborada", "alta_confianza", "confirmada"];
+const isPriority = (c) => PRIORITY_STATUSES.includes(c?.status);
+const STATUS_TEXT_FALLBACK = { corroborada: "Corroborada", alta_confianza: "Hipótesis de alta confianza (sin corroborar)",
+  confirmada: "Hipótesis de alta confianza (sin corroborar)", por_validar: "Por validar", descartada: "Descartada" };
+const statusText = (c) => { const t = c?.status_label || STATUS_TEXT_FALLBACK[c?.status] || c?.status || "—"; return t.charAt(0).toUpperCase() + t.slice(1); };
+const STATUS_CLASS = { corroborada: "bad", alta_confianza: "warn", confirmada: "warn", por_validar: "", descartada: "ok" };
+/* Respuestas: claves nuevas con respaldo a las de runs anteriores. */
+function answers(ev) {
+  const a = ev?.incident_answers || {};
+  return {
+    raw: a,
+    inicio: a["1_inicio"] || a["1_inicio_explotacion"] || {},
+    alcance: a["3_alcance_exposicion"] || a["3_facturas_accedidas_indebidamente"] || {},
+    titulares: a["7_titulares_potencialmente_expuestos"] || a["7_usuarios_potencialmente_afectados"] || {},
+    campanas: a["6_campanas"] || {},
+  };
+}
 function campaignBadge(cid) {
   if (!cid) return "—";
   return el("span", { class: `badge ${cid.toLowerCase()}` }, cid);
@@ -92,6 +111,11 @@ async function loadDatasets() {
         d.read_only ? el("span", { class: "badge", title: "Protegido contra escritura" }, "solo lectura") : null)) :
       [el("p", { class: "muted" }, "No hay CSV en data/.")]),
   );
+  const own = $("pf-ownership");
+  const prev = own.value;
+  own.replaceChildren(el("option", { value: "" }, "— sin corroborar (solo log HTTP) —"),
+    ...list.map((d) => el("option", { value: d.name }, d.name)));
+  own.value = list.some((d) => d.name === prev) ? prev : "";
 }
 
 const CUSTODY_FIELDS = ["collected_by", "collected_at", "source_system", "source_timezone", "case_id", "evidence_id",
@@ -172,6 +196,8 @@ function setManual(on) {
 }
 function profilePayload() {
   const out = { detection_date: $("pf-detection_date").value, profile_mode: $("pf-manual").checked ? "manual" : "auto" };
+  const own = $("pf-ownership").value;
+  if (own) out.ownership = own;
   if ($("pf-manual").checked) PROFILE_FIELDS.forEach((k) => (out[k] = $(`pf-${k}`).value.trim()));
   return out;
 }
@@ -278,6 +304,8 @@ function renderInvestigation() {
   const p = s.profile || {}, m = s.metrics || {}, ev = s.evidence || {}, det = s.detection || {};
   const crit = det.source_ip?.levels?.critico ?? 0;
   const ans = ev.incident_answers || {};
+  const A = answers(ev);
+  const nPriority = (ev.campaigns || []).filter(isPriority).length;
   const pr = runProfile();
   const det_date = ev.response_metrics?.detection_date;
   $("total-endpoint").textContent = pr.endpoint;
@@ -285,7 +313,8 @@ function renderInvestigation() {
     ["Registros", fmt(p.total_rows), `${when(p.first_timestamp)} → ${when(p.last_timestamp)}`],
     ["IPs únicas", fmt(p.unique_source_ips), `${fmt(det.authtoken?.total)} tokens`],
     ["IPs críticas", fmt(crit), `${fmt(det.source_ip?.levels?.alto ?? 0)} alto · ${fmt(det.source_ip?.levels?.medio ?? 0)} medio`],
-    [`${cap(pr.object_label_plural)} · IDs únicos 2xx`, fmt(ans["3_facturas_accedidas_indebidamente"]?.unique_invoices_2xx), "campañas confirmadas"],
+    [`${cap(pr.object_label_plural)} · exposición potencial`, fmt(A.alcance.unique_invoices_2xx),
+      A.alcance.accesos_indebidos_confirmados != null ? `${fmt(A.alcance.accesos_indebidos_confirmados)} confirmados con ownership` : `IDs únicos 2xx de ${nPriority} campaña(s) priorizada(s) · sin corroborar`],
     ["TTD", ans.ttd_dias != null ? `${ev.response_metrics?.ttd_is_estimate ? "≈ " : ""}${ans.ttd_dias} días` : "—",
       det_date ? `detección ${when(det_date)}` : ev.response_metrics?.ttd_reference ? `estimado al fin del log (${when(ev.response_metrics.ttd_reference)})` : "sin fecha de detección"],
   ];
@@ -338,15 +367,15 @@ function startCard(ini, ev) {
   const censored = ini.inicio_censurado ?? /censurado/.test(ini.nota || "");
   const row = (label, value) => el("div", { class: "big-row" }, el("span", { class: "big-label" }, label), value);
   return el("div", {},
-    row("Reconocimiento desde", `${censored ? "≤ " : ""}${when(ini.primera_actividad_maliciosa)}`),
-    row("Explotación desde", when(ini.primer_acceso_exitoso_2xx)));
+    row("Actividad sospechosa desde", `${censored ? "≤ " : ""}${when(ini.primera_actividad_sospechosa ?? ini.primera_actividad_maliciosa)}`),
+    row("Primer 2xx de la campaña", when(ini.primer_acceso_exitoso_2xx)));
 }
 function startDetail(ini, ev) {
-  const camp = (ev.campaigns || []).find((c) => c.status === "confirmada");
+  const camp = (ev.campaigns || []).find(isPriority);
   const before = (camp?.phases || []).filter((p) => ini.primer_acceso_exitoso_2xx && p.end < ini.primer_acceso_exitoso_2xx.slice(0, 10));
-  const recon = before.length ? `Antes de la explotación: ~${before[0].median_per_day} peticiones/día con éxito ${pct(before[0].success_ratio)} (intentos rechazados). ` : "";
+  const recon = before.length ? `Antes del primer 2xx: ~${before[0].median_per_day} peticiones/día con éxito ${pct(before[0].success_ratio)} (intentos rechazados). ` : "";
   const ip = ini.ip_primer_acceso || camp?.exploitation_start?.source_ip;
-  const first = ini.primer_acceso_exitoso_2xx ? `Primer acceso exitoso (2xx) a ${runProfile().object_label} de otro usuario${ip ? ` desde ${ip}` : ""}: inicio de la exposición de datos. ` : "";
+  const first = ini.primer_acceso_exitoso_2xx ? `Primera respuesta 2xx de la campaña${ip ? ` desde ${ip}` : ""}: inicio de la exposición POTENCIAL (el log no dice si el ${runProfile().object_label} era de otro titular). ` : "";
   const censored = ini.inicio_censurado ?? /censurado/.test(ini.nota || "");
   return recon + first + (censored ? "La primera actividad coincide con el primer registro del log: pudo comenzar antes (dato censurado)." : ini.nota || "");
 }
@@ -376,6 +405,39 @@ function renderCustodyIntake() {
   box.hidden = false;
 }
 
+function attributionText(at) {
+  if (typeof at === "string") return at.replaceAll("_", " ");
+  const how = at.method === "ip_completa" ? "todo el tráfico de IPs sin segmento de UA concentrado" : "segmentos de user agent concentrados en IPs sospechosas";
+  const uas = at.user_agents_concentrados?.length ? ` · UA: ${at.user_agents_concentrados.map((u) => short(u, 40)).join(", ")}` : "";
+  const ips = at.ips_atribuidas_completas?.length ? ` · IPs completas: ${at.ips_atribuidas_completas.join(", ")}` : "";
+  return how + uas + ips;
+}
+function corroborationNode(co, pr) {
+  if (co.status !== "evaluada") {
+    return el("div", { class: "note warn-text" }, "Corroboración pendiente: ",
+      el("ul", { class: "reasons" }, (co.sources_needed || []).map((x) => el("li", {}, x))));
+  }
+  return el("p", {}, `Corroboración (ownership): ${fmt(co.unauthorized_2xx)} respuestas 2xx a quien NO era titular · ${fmt(co.unique_objects_unauthorized)} ${pr.object_label_plural} · ${fmt(co.unique_owners_exposed)} titulares · ${fmt(co.authorized_2xx)} del propio titular · ${fmt(co.unknown_owner_2xx)} sin dato`);
+}
+/* Nivel de evidencia del run y lo que el log NO permite afirmar. */
+function renderAssessment(ev) {
+  const box = $("assessment");
+  const as = ev.assessment;
+  if (!box) return;
+  if (!as) { box.hidden = true; box.replaceChildren(); return; }
+  const scale = as.scale || ["señal", "hipótesis", "corroboración", "impacto confirmado"];
+  box.replaceChildren(
+    el("div", { class: "row" }, el("h3", {}, "Nivel de evidencia"),
+      ...scale.map((s) => el("span", { class: `badge ${s === as.level ? "warn" : ""}` }, s === as.level ? `● ${s}` : s))),
+    el("p", {}, as.statement || ""),
+    el("details", {}, el("summary", {}, "Lo que el log no permite afirmar y cómo confirmarlo"),
+      el("ul", { class: "reasons" }, (as.limitations || []).map((x) => el("li", {}, x))),
+      el("p", { class: "muted" }, "Para confirmar:"),
+      el("ul", { class: "reasons" }, (as.to_confirm || []).map((x) => el("li", {}, x))),
+      as.corroboration_source ? el("p", { class: "muted" }, `Fuente de corroboración usada: ${as.corroboration_source.name} · ${fmt(as.corroboration_source.rows)} filas · SHA-256 ${as.corroboration_source.sha256}`) : null));
+  box.hidden = false;
+}
+
 function renderEvidence() {
   const ev = state.summary.evidence;
   ["dl-evidence:evidence.json", "dl-iocs:iocs.csv", "dl-manifest:manifest.json"].forEach((x) => downloadLink(...x.split(":")));
@@ -385,30 +447,41 @@ function renderEvidence() {
   $("verify-results").replaceChildren();
   if (!ev) { $("answers").replaceChildren(el("p", { class: "muted" }, "Este run no tiene evidencia.")); return; }
   const a = ev.incident_answers || {};
+  const A = answers(ev);
   const pr = runProfile();
-  const pairs = a["3_facturas_accedidas_indebidamente"]?.invoice_site_pairs_2xx;
+  const al = A.alcance, ti = A.titulares, ca = A.campanas;
+  const pairs = al.invoice_site_pairs_2xx;
+  const confirmed = al.accesos_indebidos_confirmados;
+  const counts = ca.corroboradas != null
+    ? `${ca.corroboradas} corroborada · ${ca.alta_confianza ?? 0} alta confianza · ${ca.por_validar ?? 0} por validar${ca.descartadas ? ` · ${ca.descartadas} descartada` : ""}`
+    : `${ca.confirmadas ?? 0} alta confianza · ${ca.por_validar ?? 0} por validar`;
   const cards = [
-    ["1. ¿Cuándo comenzó?", startCard(a["1_inicio_explotacion"] || {}, ev), startDetail(a["1_inicio_explotacion"] || {}, ev)],
-    ["2. ¿Evidencia clara de IDOR?", a["2_evidencia_idor"]?.respuesta, a["2_evidencia_idor"]?.fundamento],
-    [`3. Alcance: ${pr.object_label_plural} (IDs únicos 2xx)`, fmt(a["3_facturas_accedidas_indebidamente"]?.unique_invoices_2xx), `${pr.scope_param && pairs != null ? `${fmt(pairs)} pares ${pr.object_label}–${pr.scope_label}. ` : ""}${a["3_facturas_accedidas_indebidamente"]?.nota || ""}`],
+    ["1. ¿Cuándo comenzó?", startCard(A.inicio, ev), startDetail(A.inicio, ev)],
+    ["2. ¿Evidencia clara de IDOR?", a["2_evidencia_idor"]?.respuesta, `${a["2_evidencia_idor"]?.nivel ? `Nivel: ${a["2_evidencia_idor"].nivel}. ` : ""}${a["2_evidencia_idor"]?.fundamento || ""}`],
+    [`3. Alcance (${pr.object_label_plural})`, confirmed != null ? `${fmt(confirmed)} confirmados` : `≤ ${fmt(al.unique_invoices_2xx)}`,
+      `${confirmed != null ? `De ${fmt(al.unique_invoices_2xx)} IDs con 2xx. ` : "Exposición potencial (IDs únicos con 2xx), no accesos indebidos demostrados. "}${pr.scope_param && pairs != null ? `${fmt(pairs)} pares ${pr.object_label}–${pr.scope_label}. ` : ""}${al.nota || ""}`],
     ["4. ¿Patrón secuencial?", (a["4_patron_secuencial"]?.respuesta || "").split(",")[0],
       `${(a["4_patron_secuencial"]?.respuesta || "").split(",").slice(1).join(",").trim()}. ${a["4_patron_secuencial"]?.fundamento || ""}`],
     ["5. ¿Automatizado?", a["5_automatizado"]?.respuesta, a["5_automatizado"]?.fundamento],
-    ["6. ¿Una o varias campañas?", `${a["6_campanas"]?.confirmadas ?? 0} confirmada · ${a["6_campanas"]?.por_validar ?? 0} por validar`, ""],
-    ["7. ¿Usuarios afectados?", `≤ ${fmt(a["7_usuarios_potencialmente_afectados"]?.limite_superior)}`,
-      `${pr.scope_param ? `Por ${pr.scope_label}: ${Object.entries(a["7_usuarios_potencialmente_afectados"]?.por_site_id || {}).map(([k, v]) => `${k}: ${fmt(v)}`).join(" · ")}. ` : ""}${a["7_usuarios_potencialmente_afectados"]?.nota || ""}`],
+    ["6. ¿Una o varias campañas?", counts, ""],
+    ["7. ¿Titulares expuestos?", ti.confirmados != null ? `${fmt(ti.confirmados)} confirmados` : `≤ ${fmt(ti.limite_superior)}`,
+      `${pr.scope_param ? `Por ${pr.scope_label}: ${Object.entries(ti.por_site_id || {}).map(([k, v]) => `${k}: ${fmt(v)}`).join(" · ")}. ` : ""}${ti.nota || ""}`],
   ];
+  renderAssessment(ev);
   $("answers").replaceChildren(...cards.map(([q, big, text]) => el("div", { class: "answer" }, el("div", { class: "q" }, q), el("div", { class: "big" }, big ?? "—"), el("div", { class: "a" }, text))));
 
   $("campaigns").replaceChildren(...(ev.campaigns || []).map((c) => el("div", { class: "card" },
-    el("h3", {}, campaignBadge(c.campaign_id), " ", c.status === "confirmada" ? "Confirmada" : "Por validar"),
+    el("h3", {}, campaignBadge(c.campaign_id), " ", el("span", { class: `badge ${STATUS_CLASS[c.status] ?? ""}` }, statusText(c))),
     el("p", { class: "muted" }, `${when(c.first_seen)} → ${when(c.last_seen)} · ${fmt(c.requests)} peticiones`),
     el("p", {}, "IPs: ", el("span", { class: "mono" }, c.ips.join(", "))),
     el("p", {}, "Tokens: ", el("span", { class: "mono" }, c.tokens.map((t) => t.hint).join(", "))),
     el("p", {}, "UA: ", c.user_agents.map((u) => `${u.user_agent} (${u.category})`).join(" · ")),
-    el("p", {}, `${cap(pr.object_label_plural)} con 2xx (IDs únicos): ${fmt(c.impact.unique_invoices_2xx)} (fuera del rango normal: ${fmt(c.impact.unique_invoices_2xx_outside_baseline)})`),
+    el("p", {}, `${cap(pr.object_label_plural)} con 2xx (exposición potencial, IDs únicos): ${fmt(c.impact.unique_invoices_2xx)} (fuera del rango normal: ${fmt(c.impact.unique_invoices_2xx_outside_baseline)})`),
     el("ul", { class: "reasons" }, c.phases.map((p) => el("li", {}, `Fase ${p.phase}: ${p.start} → ${p.end} · ${p.median_per_day}/día · éxito ${pct(p.success_ratio)}${p.constant_daily_volume ? " · volumen constante" : ""}`))),
-    el("p", { class: "muted" }, `Patient zero: ${when(c.patient_zero.ts)} desde ${c.patient_zero.source_ip} (status ${c.patient_zero.status})`))));
+    el("p", { class: "muted" }, `Patient zero: ${when(c.patient_zero.ts)} desde ${c.patient_zero.source_ip} (status ${c.patient_zero.status})`),
+    c.signals ? el("p", {}, "Señales: ", ...Object.entries(c.signals).map(([k, v]) => el("span", { class: `badge ${v ? "warn" : ""}`, title: v ? "presente" : "ausente" }, `${v ? "✓" : "–"} ${k.replaceAll("_", " ")}`))) : null,
+    c.attribution ? el("p", { class: "muted" }, `Atribución: ${attributionText(c.attribution)}`) : null,
+    c.corroboration ? corroborationNode(c.corroboration, pr) : null)));
 
   $("timeline").replaceChildren(...(ev.timeline || []).map((t) =>
     el("li", { class: (t.campaign_id || "").toLowerCase() }, el("div", { class: "when" }, when(t.ts), t.campaign_id ? ` · ${t.campaign_id}` : ""), t.event)));
@@ -584,12 +657,21 @@ function renderAgents() {
   );
   const executed = new Map((rep.executed || []).map((e) => [e.action_id, e]));
   const artifactLink = (e) => el("a", { class: "small", href: `/api/runs/${state.run}/download/agents/${e.artifact}`, title: "Artefacto dry-run (no aplicado)" }, "ver artefacto");
-  table($("actions-table"), ["ID", "Tipo", "Fase", "Prioridad", "Objetivo", "Origen", "Riesgo FP", "Impacto", "Aprobación", "Resultado"],
+  /* Ciclo de vida: recomendación automática ≠ decisión humana ≠ ejecución. La ejecución real no existe en el MVP. */
+  const decisionOf = (a) => !a.requires_human_approval ? "automática"
+    : ({ approve: "aprobada", reject: "rechazada" }[rep.approvals?.[a.action_id]] || "sin decisión");
+  table($("actions-table"), ["ID", "Tipo", "Fase", "Prioridad", "Objetivo", "Recomendada por", "Evidencia exigida", "Riesgo FP", "Impacto", "Decisión", "Ejecución"],
     (ro.actions || []).map((a) => [a.action_id, a.action_type, a.phase, a.priority, a.target,
-      a.added_by_policy ? el("span", { class: "badge warn" }, "agregada por política") : el("span", { class: "muted small" }, a.mandatory ? `modelo · obligatoria (${a.reason_required})` : "modelo"),
+      a.added_by_policy ? el("span", { class: "badge warn" }, "política") : el("span", { class: "muted small" }, a.mandatory ? `agente · obligatoria (${a.reason_required})` : "agente"),
+      a.evidence_required || "señal",
       a.false_positive_risk, a.business_impact,
-      a.requires_human_approval ? `humana → ${rep.approvals?.[a.action_id] || "—"}` : "automática",
-      executed.has(a.action_id) ? el("span", { class: "result-cell" }, el("span", { class: "badge ok" }, "ejecutada (dry-run)"), artifactLink(executed.get(a.action_id))) : el("span", { class: "badge warn" }, "no ejecutada")]));
+      decisionOf(a),
+      a.blocked_reason ? el("span", { class: "badge bad", title: a.blocked_reason }, "condicionada: evidencia insuficiente")
+        : executed.has(a.action_id) ? el("span", { class: "result-cell" }, el("span", { class: "badge ok" }, "dry-run (NO aplicada)"), artifactLink(executed.get(a.action_id)))
+        : el("span", { class: "badge warn" }, "no ejecutada")]));
+  $("actions-note").textContent = `Nivel de evidencia del run: ${rep.evidence_level || "—"}. Recomendar no es aprobar y aprobar no es ejecutar: `
+    + "las acciones aprobadas solo generan artefactos dry-run revisables; la ejecución real en sistemas de producción no está soportada en el MVP. "
+    + "Una acción cuya evidencia exigida supera el nivel del run queda condicionada aunque se apruebe.";
   $("playbook").replaceChildren(...(ro.playbook || []).map((p) => el("li", {}, p)));
   const est = rep.response_time_estimates || {};
   const bt = est.detection_backtest || {};
@@ -645,7 +727,9 @@ $("agents-btn").addEventListener("click", async () => {
 function actionSummary(a) {
   return el("div", {}, el("strong", {}, `${a.action_id} · ${a.action_type}`), ` (${a.phase}, prioridad ${a.priority})`,
     el("div", { class: "muted" }, a.target),
-    el("div", { class: "muted" }, `${a.rationale} · FP ${a.false_positive_risk} · impacto ${a.business_impact}`));
+    el("div", { class: "muted" }, `${a.rationale} · FP ${a.false_positive_risk} · impacto ${a.business_impact}`),
+    el("div", { class: "muted small" }, `Evidencia exigida: ${a.evidence_required || "señal"}`),
+    a.blocked_reason ? el("div", { class: "warn-text small" }, `Condicionada: ${a.blocked_reason}. Aunque se apruebe, no se ejecutará hasta corroborar.`) : null);
 }
 async function showApprovals(jobId) {
   const job = await api(`/api/jobs/${jobId}`);
@@ -665,7 +749,11 @@ async function showApprovals(jobId) {
         el("span", { class: "badge ok" }, "Automática"))),
     );
   }
+  if (state.config && !state.config.can_approve) {
+    items.unshift(el("p", { class: "warn-text" }, "Su sesión tiene el rol analista: la decisión la toma un usuario con el rol aprobador (IRP_APPROVER_TOKEN). Si nadie decide en 30 min, las acciones se rechazan."));
+  }
   $("approval-list").replaceChildren(...items);
+  $("submit-approvals").disabled = state.config ? !state.config.can_approve : false;
   $("approval-box").hidden = false;
 }
 $("approve-all").addEventListener("click", () => document.querySelectorAll("#approval-list select").forEach((s) => (s.value = "approve")));
@@ -694,7 +782,9 @@ async function loadConfig() {
     ["Parámetros" + (fixed ? "" : " de respaldo"), [p.object_param, p.scope_param, p.token_param].filter(Boolean).join(" · ")],
     ["Formato de fecha", c.timestamp_format || "automático"],
     ["Fecha de detección", c.detection_date ? when(c.detection_date) : "no definida (se indica en cada análisis)"],
-    ["Autenticación", c.auth_enabled ? "token requerido" : "desactivada (solo localhost)"]]);
+    ["Autenticación", c.auth_enabled ? "token requerido" : "desactivada (solo localhost)"],
+    ["Sesión", c.auth_enabled ? `${c.user} · rol ${c.role.replace("_", " ")}${c.can_approve ? " (puede aprobar)" : " (no puede aprobar)"}` : "local"],
+    ["Separación de funciones", c.separate_approver ? "analista y aprobador con tokens distintos" : "un solo operador (defina IRP_APPROVER_TOKEN para separar)"]]);
   $("pf-detection_date").value = (c.detection_date || "").slice(0, 10);
   if (!state.summary?.manifest) fillProfileForm();
   setManual(false);

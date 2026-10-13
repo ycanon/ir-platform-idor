@@ -28,7 +28,15 @@ TechniqueId = Literal["T1595.002", "T1595.003", "T1190", "T1078", "T1119", "T121
 
 Severity = Literal["critico", "alto", "medio", "bajo"]
 ActionType = Literal[
-    "block_ip", "rate_limit", "revoke_token", "waf_rule", "monitoring", "fix_idor", "rotate_tokens", "notify"
+    "corroborate",
+    "block_ip",
+    "rate_limit",
+    "revoke_token",
+    "waf_rule",
+    "monitoring",
+    "fix_idor",
+    "rotate_tokens",
+    "notify",
 ]
 
 
@@ -102,9 +110,13 @@ class ResponseAction(BaseModel):
     false_positive_risk: Literal["bajo", "medio", "alto"]
     business_impact: Literal["bajo", "medio", "alto"]
     requires_human_approval: bool  # el código lo puede ENDURECER según la política, nunca relajar
-    mandatory: bool = False  # la evidencia la exige (campaña confirmada, por validar, datos personales)
+    mandatory: bool = False  # la evidencia la exige (campaña priorizada, por validar, datos personales)
     added_by_policy: bool = False  # el modelo no la incluyó y la política la agregó
     reason_required: str = ""
+    # Lo fija la política (código), nunca el modelo: nivel de evidencia que exige la acción y, si no se cumple,
+    # por qué queda condicionada (no se ejecuta aunque se apruebe).
+    evidence_required: str = "señal"
+    blocked_reason: str = ""
 
 
 class ResponseOutput(BaseModel):

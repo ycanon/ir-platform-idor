@@ -29,6 +29,7 @@ from idor_ir.agents.schemas import (
     TriageDraft,
     TriageOutput,
 )
+from idor_ir.forensics.assessment import STATUS_CORROBORATED, status_label
 
 SEVERITY_ORDER = {"bajo": 0, "medio": 1, "alto": 2, "critico": 3}
 # Temas que los logs de acceso NO pueden demostrar: si el modelo los presenta como "hecho", se reclasifican como
@@ -52,8 +53,11 @@ def confidence(ctx: dict[str, Any]) -> tuple[float, list[str]]:
     if not confirmed:
         pending = fallback._pending(ctx)
         return (0.5, ["solo campañas por validar"]) if pending else (0.4, ["sin campañas sospechosas"])
-    score, basis = 0.6, ["campaña confirmada (IP con nivel crítico y UA de herramienta)"]
     c = confirmed[0]
+    if c.get("status") == STATUS_CORROBORATED:
+        score, basis = 0.8, ["IDOR corroborado con una fuente de ownership de la aplicación"]
+    else:
+        score, basis = 0.5, ["hipótesis de alta confianza (IP crítica y señales concordantes), sin corroborar"]
     imp = c.get("impact", {})
     if imp.get("unique_invoices_2xx_outside_baseline"):
         score += 0.1
@@ -67,7 +71,7 @@ def confidence(ctx: dict[str, Any]) -> tuple[float, list[str]]:
         basis.append("fase de sondeo con 0 % de éxito seguida de éxito")
     if imp.get("success_2xx_with_token") and not imp.get("success_2xx_without_token"):
         score += 0.05
-        basis.append("todas las respuestas 2xx fueron con credencial (falla de autorización)")
+        basis.append("todas las respuestas 2xx fueron con credencial (posible falla de autorización)")
     return round(min(score, 0.9), 2), basis
 
 
@@ -107,7 +111,7 @@ def assemble_triage(draft: TriageDraft, ctx: dict[str, Any], extra_checks: Check
 
     conf, basis = confidence(ctx)
     checks.code_additions.append(f"Confianza calculada por el código: {conf:.0%}")
-    targets = [f"{c['id']} (confirmada)" for c in fallback._confirmed(ctx)] + [
+    targets = [f"{c['id']} ({status_label(c['status'])})" for c in fallback._confirmed(ctx)] + [
         f"{c['id']} (validar antes de actuar)" for c in fallback._pending(ctx)
     ]
     return TriageOutput(

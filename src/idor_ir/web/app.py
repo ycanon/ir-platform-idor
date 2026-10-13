@@ -47,12 +47,20 @@ from idor_ir.web.jobs import Job, JobManager
 from idor_ir.web.llm_runtime import LLMRuntime
 from idor_ir.web.security import (
     CSRF_COOKIE,
+    ROLE_ANALYST,
+    ROLE_APPROVER,
+    ROLE_SINGLE,
     SESSION_COOKIE,
     AuthMiddleware,
+    Principal,
     SecurityHeadersMiddleware,
+    SessionSigner,
+    clean_user,
+    is_https,
     new_csrf_token,
+    principal_of,
+    require_approver,
     require_csrf,
-    session_value,
     set_cookie,
 )
 from idor_ir.web.ti_runtime import TIRuntime
@@ -114,6 +122,8 @@ class StartAnalysis(BaseModel):
     object_label: str | None = Field(default=None, max_length=30)
     object_label_plural: str | None = Field(default=None, max_length=30)
     scope_label: str | None = Field(default=None, max_length=30)
+    # Fuente de corroboración (CSV de ownership objeto → titular) dentro de la misma lista blanca de data/.
+    ownership: str | None = Field(default=None, max_length=200)
 
 
 class StartEvaluation(BaseModel):
@@ -195,18 +205,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
     token = settings.access_token.get_secret_value() if settings.access_token else None
+    approver = settings.approver_token.get_secret_value() if settings.approver_token else None
+    if token and approver and hmac.compare_digest(token.encode(), approver.encode()):
+        raise ValueError("IRP_APPROVER_TOKEN debe ser distinto de IRP_ACCESS_TOKEN")
+    signer = SessionSigner(settings.session_hours) if (token or approver) else None
+    from idor_ir.agents.providers import configure_egress
+    from idor_ir.config import export_env_passthrough
+
+    export_env_passthrough()  # TI_ALLOWED_HOSTS del .env (anti-SSRF de TI)
+    configure_egress(settings)  # lista blanca de salida de los clientes LLM (anti-SSRF)
 
     # Swagger UI/ReDoc desactivados: cargan scripts de un CDN externo con JS inline (incompatible con la CSP).
     # El esquema queda disponible en /openapi.json, detrás del mismo control de acceso.
     app = FastAPI(title="IR Platform — IDOR", version=__version__, docs_url=None, redoc_url=None)
     metrics_token = settings.metrics_token.get_secret_value() if settings.metrics_token else None
-    app.add_middleware(AuthMiddleware, token=token, metrics_token=metrics_token)
+    app.add_middleware(AuthMiddleware, signer=signer, metrics_token=metrics_token)
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")  # autoescape activado para .html
     jobs = JobManager()
     data_dir = settings.data_dir.resolve()
     output_dir = settings.output_dir.resolve()
+    custody = CustodyLog(settings.output_dir / "custody_log.jsonl")  # quién inicia sesión, aprueba o autoriza
 
     @app.middleware("http")
     async def count_requests(request: Request, call_next: Any) -> Response:
@@ -266,27 +286,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> Response:
         csrf = request.cookies.get(CSRF_COOKIE) or new_csrf_token()
+        who = principal_of(request)
         response = templates.TemplateResponse(
-            request, "index.html", {"csrf_token": csrf, "version": __version__, "auth": bool(token)}
+            request,
+            "index.html",
+            {"csrf_token": csrf, "version": __version__, "auth": signer is not None, "who": who},
         )
-        set_cookie(response, CSRF_COOKIE, csrf, http_only=False)
+        set_cookie(response, CSRF_COOKIE, csrf, http_only=False, secure=secure_cookie(request))
         return response
+
+    def secure_cookie(request: Request) -> bool:
+        return bool(settings.cookie_secure) or is_https(request)
+
+    def role_for(candidate: str) -> str | None:
+        """Rol del token presentado (comparación en tiempo constante contra ambos)."""
+        is_approver = bool(approver) and hmac.compare_digest(candidate.encode(), (approver or "").encode())
+        is_analyst = bool(token) and hmac.compare_digest(candidate.encode(), (token or "").encode())
+        if is_approver:
+            return ROLE_APPROVER
+        if is_analyst:
+            return ROLE_ANALYST if approver else ROLE_SINGLE
+        return None
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> Response:
-        if not token:
+        if signer is None:
             return Response(status_code=303, headers={"Location": "/"})
-        return templates.TemplateResponse(request, "login.html", {"error": None})
+        return templates.TemplateResponse(request, "login.html", {"error": None, "roles": bool(approver)})
 
     @app.post("/login", response_class=HTMLResponse)
-    async def login(request: Request, access_token: str = Form(max_length=256)) -> Response:
-        if not token:
+    async def login(
+        request: Request, access_token: str = Form(max_length=256), user: str = Form(default="", max_length=120)
+    ) -> Response:
+        if signer is None:
             return Response(status_code=303, headers={"Location": "/"})
-        if not hmac.compare_digest(access_token.encode(), token.encode()):
+        name = clean_user(user)
+        role = role_for(access_token)
+        if role is None or name is None:
             await asyncio.sleep(1)  # frena la fuerza bruta
-            return templates.TemplateResponse(request, "login.html", {"error": "Token inválido"}, status_code=401)
+            error = "Token inválido" if role is None else "Indique su nombre o usuario (2-60 caracteres)"
+            return templates.TemplateResponse(
+                request, "login.html", {"error": error, "roles": bool(approver)}, status_code=401
+            )
+        principal = Principal(name, role)
+        custody.append("session_started", principal.audit())
         response = Response(status_code=303, headers={"Location": "/"})
-        set_cookie(response, SESSION_COOKIE, session_value(token), http_only=True)
+        set_cookie(
+            response, SESSION_COOKIE, signer.issue(principal), http_only=True, secure=secure_cookie(request),
+            max_age=settings.session_hours * 3600,
+        )  # fmt: skip
         return response
 
     @app.post("/logout", dependencies=[Depends(require_csrf)])
@@ -301,7 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     @app.get("/api/config")
-    async def config() -> dict[str, Any]:
+    async def config(request: Request) -> dict[str, Any]:
         # Solo valores no sensibles.
         return {
             "version": __version__,
@@ -312,7 +360,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "profile_mode": settings.profile_mode,
             "profile": {k: getattr(settings, k) for k in RUN_PROFILE_FIELDS},
             "max_upload_mb": settings.max_upload_mb,
-            "auth_enabled": bool(token),
+            "auth_enabled": signer is not None,
+            "separate_approver": bool(approver),
+            "user": principal_of(request).user,
+            "role": principal_of(request).role,
+            "can_approve": principal_of(request).can_approve,
         }
 
     # ------------------------------------------------------------------ API: proveedor LLM (Configuración)
@@ -320,7 +372,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def llm_state() -> dict[str, Any]:
         return llm_runtime.public()
 
-    @app.post("/api/llm/config", dependencies=[Depends(require_csrf)])
+    @app.post("/api/llm/config", dependencies=[Depends(require_csrf), Depends(require_approver)])
     async def llm_update(body: LLMUpdate) -> dict[str, Any]:
         try:
             llm_runtime.update(
@@ -341,7 +393,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(404, "Proveedor desconocido") from exc
 
-    @app.post("/api/llm/chat", dependencies=[Depends(require_csrf)])
+    @app.post("/api/llm/chat", dependencies=[Depends(require_csrf), Depends(require_approver)])
     async def llm_chat_update(body: ChatLLMUpdate) -> dict[str, Any]:
         """Proveedor y modelo de la conversación con los agentes (iguales o distintos a los de los agentes)."""
         try:
@@ -442,7 +494,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ti_state() -> dict[str, Any]:
         return await ti_public()
 
-    @app.post("/api/ti/config", dependencies=[Depends(require_csrf)])
+    @app.post("/api/ti/config", dependencies=[Depends(require_csrf), Depends(require_approver)])
     async def ti_update(body: TIUpdate) -> dict[str, Any]:
         try:
             ti_runtime.update(
@@ -479,7 +531,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"source": body.source, "ok": False, "detail": str(exc)}
 
     @app.post("/api/runs/{run_id}/enrich", dependencies=[Depends(require_csrf)])
-    async def start_enrichment(run_id: str, body: StartEnrichment) -> dict[str, Any]:
+    async def start_enrichment(
+        run_id: str, body: StartEnrichment, who: Annotated[Principal, Depends(require_approver)]
+    ) -> dict[str, Any]:
+        """Envía IPs a terceros: decisión del rol aprobador, con consentimiento auditado (plataforma y gateway)."""
         from idor_ir.enrichment.ti import enrich_run
 
         d = run_dir_of(run_id)
@@ -501,7 +556,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "at": datetime.now(UTC).isoformat(timespec="seconds"),
             "sources": sources,
             "note": "Solo IPs públicas del Top 20; VirusTotal agrega los indicadores consultados a su dataset público",
+            "by": who.audit(),
         }
+        custody.append("ti_enrichment_authorized", {"run_id": run_id, "sources": sources, "by": who.audit()})
         launch = ti_runtime.launch(sources)  # solo las claves de las fuentes elegidas
 
         def work(job: Job) -> dict[str, Any]:
@@ -675,11 +732,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------------ API: trabajos
     @app.post("/api/analyses", dependencies=[Depends(require_csrf)])
     async def start_analysis(body: StartAnalysis) -> dict[str, Any]:
-        source = datasets().get(body.dataset)
+        available = datasets()
+        source = available.get(body.dataset)
         if source is None:
             raise HTTPException(404, "Dataset no encontrado")
+        ownership: Path | None = None
+        if body.ownership:
+            ownership = available.get(body.ownership)
+            if ownership is None:
+                raise HTTPException(404, "Fuente de ownership no encontrada")
+            if ownership == source:
+                raise HTTPException(422, "La fuente de ownership no puede ser el mismo log analizado")
         try:
-            fields = body.model_dump(exclude={"dataset", "profile_mode"})
+            fields = body.model_dump(exclude={"dataset", "profile_mode", "ownership"})
             if body.profile_mode == "auto":
                 fields = {"detection_date": fields["detection_date"]}
             run_settings = settings.for_run(fields)
@@ -690,7 +755,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def work(job: Job) -> dict[str, Any]:
             started = time.perf_counter()
             try:
-                result = run_analysis(source, run_settings, detect=True, on_progress=lambda s, m: job.emit(s, m))
+                result = run_analysis(
+                    source, run_settings, detect=True, on_progress=lambda s, m: job.emit(s, m), ownership=ownership
+                )
             except Exception:
                 obs.ANALYSES.labels("failed").inc()
                 raise
@@ -737,7 +804,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/chat", dependencies=[Depends(require_csrf)])
-    async def chat_ask(run_id: str, body: ChatMessage) -> dict[str, Any]:
+    async def chat_ask(run_id: str, body: ChatMessage, request: Request) -> dict[str, Any]:
         from idor_ir.agents import providers
         from idor_ir.agents.chat import ChatError, ask
         from idor_ir.agents.data_answers import is_data_question
@@ -754,13 +821,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 400, f"{cfg.spec.label} está fuera de la red local: confirme el envío del contexto agregado"
             )
+        who = principal_of(request)
+        if off_lan and not who.can_approve:  # salida de datos fuera de la red: decisión del rol aprobador
+            raise HTTPException(403, "Enviar contexto a un proveedor fuera de la red local requiere el rol aprobador")
         llm: Any = None
         try:
             llm = providers.build_client(cfg)
         except LLMError as exc:
             if not data_only:
                 raise HTTPException(400, f"{exc}. Configure el proveedor en la pestaña Configuración") from exc
-        meta = {"provider": cfg.provider, "off_lan": off_lan, "consent": body.cloud_consent if off_lan else None}
+        meta = {
+            "provider": cfg.provider,
+            "off_lan": off_lan,
+            "consent": body.cloud_consent if off_lan else None,
+            "consent_by": who.audit() if off_lan else None,
+        }
 
         def work(job: Job) -> dict[str, Any]:
             buffer: list[str] = []
@@ -851,7 +926,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"job_id": job.id}
 
     @app.post("/api/runs/{run_id}/agents", dependencies=[Depends(require_csrf)])
-    async def start_agents(run_id: str, body: StartAgents) -> dict[str, Any]:
+    async def start_agents(run_id: str, body: StartAgents, request: Request) -> dict[str, Any]:
         from idor_ir.agents.llm import LLMError
         from idor_ir.agents.providers import build_client
 
@@ -864,12 +939,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 400, f"{cfg.spec.label} está fuera de la red local: confirme el envío del contexto agregado"
             )
+        who = principal_of(request)
+        if off_lan and not who.can_approve:  # salida de datos fuera de la red: decisión del rol aprobador
+            raise HTTPException(403, "Enviar contexto a un proveedor fuera de la red local requiere el rol aprobador")
         llm_meta = {
             "provider": cfg.provider if body.use_llm else None,
             "model": cfg.model if body.use_llm else None,
             "off_lan": off_lan,
             "consent": body.cloud_consent if off_lan else None,
             "consent_at": datetime.now(UTC).isoformat(timespec="seconds") if off_lan else None,
+            "consent_by": who.audit() if off_lan else None,
         }
 
         def work(job: Job) -> dict[str, Any]:
@@ -901,7 +980,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             started = time.perf_counter()
             meta = {**llm_meta, "used": llm is not None}
-            report = run_agents(d, settings, llm, job.wait_for_approval, on_event=on_event, llm_meta=meta)
+            report = run_agents(
+                d, settings, llm, job.wait_for_approval, on_event=on_event, llm_meta=meta,
+                started_by=who.audit(), decided_by=lambda: job.approver,
+            )  # fmt: skip
             obs.AGENT_SECONDS.observe(time.perf_counter() - started)
             for agent in ("triage", "forensic", "response"):
                 checks = (report.get(agent) or {}).get("checks") or {}
@@ -924,14 +1006,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return job.public()
 
     @app.post("/api/jobs/{job_id}/approvals", dependencies=[Depends(require_csrf)])
-    async def approvals(job_id: str, body: Approvals) -> dict[str, Any]:
+    async def approvals(
+        job_id: str, body: Approvals, who: Annotated[Principal, Depends(require_approver)]
+    ) -> dict[str, Any]:
         job = jobs.get(job_id)
         if job is None or job.status != "awaiting_approval":
             raise HTTPException(409, "El trabajo no espera aprobación")
         valid = {a["action_id"] for a in job.pending_actions}
         decisions = {k: v for k, v in body.decisions.items() if k in valid and v in {"approve", "reject"}}
-        job.submit_approvals(decisions)
-        return {"accepted": decisions}
+        job.submit_approvals(decisions, who.audit())
+        return {"accepted": decisions, "decided_by": who.audit()}
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str, request: Request) -> StreamingResponse:

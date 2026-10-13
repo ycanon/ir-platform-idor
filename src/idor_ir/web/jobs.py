@@ -33,6 +33,7 @@ class Job:
     # Acciones que se ejecutan sin aprobación (solo informativas en la pausa; no se deciden).
     automatic_actions: list[dict[str, Any]] = field(default_factory=list)
     created: float = field(default_factory=time.time)
+    approver: dict[str, str] | None = None  # usuario y rol que decidió las aprobaciones
     _approvals: dict[str, str] = field(default_factory=dict)
     _decided: threading.Event = field(default_factory=threading.Event)
     _seq: int = 0
@@ -67,8 +68,9 @@ class Job:
         # Acción sin decisión explícita = rechazada (fail-safe: nada se ejecuta sin aprobación expresa).
         return {aid: self._approvals.get(aid, "reject") for aid in pending}
 
-    def submit_approvals(self, approvals: dict[str, str]) -> None:
+    def submit_approvals(self, approvals: dict[str, str], approver: dict[str, str] | None = None) -> None:
         self._approvals = approvals
+        self.approver = approver  # quién decidió (usuario y rol de la sesión): va a la cadena de custodia
         self._decided.set()
 
     def public(self) -> dict[str, Any]:

@@ -85,12 +85,12 @@ def sidecar_path(source: Path) -> Path:
 
 
 def make_read_only(path: Path) -> bool:
-    """Quita los permisos de escritura (atributo «solo lectura» en Windows, 0444 en POSIX).
+    """Quita los permisos de escritura y de lectura ajena (atributo «solo lectura» en Windows, 0400 en POSIX).
 
     Devuelve si el archivo quedó efectivamente sin bits de escritura. Es una protección operativa: la garantía
     criptográfica sigue siendo el SHA-256 registrado (algunos montajes, p. ej. de Docker Desktop, la ignoran)."""
     try:
-        os.chmod(path, stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(path, stat.S_IREAD)  # 0400: solo el dueño puede leer (no 0444)
     except OSError:
         return False
     return is_read_only(path)

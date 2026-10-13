@@ -12,6 +12,8 @@ Comandos:
   serve [--host --port]   Interfaz web en http://127.0.0.1:8000
   verify  --run RUN_ID [--file RUTA]
                           Re-verifica artefactos, cadena de custodia y (opcional) el archivo original.
+  validate-detector [--seeds N] [--target-fpr F] [--no-campaigns]
+                          Precisión, recall y falsos positivos del detector en un banco sintético etiquetado.
 
 Uso:  python -m idor_ir analyze --file data/three_months.csv
 """
@@ -88,7 +90,8 @@ def cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
 def cmd_analyze(args: argparse.Namespace, settings: Settings) -> int:
     source = _validate_input_file(args.file)
     logger.info("Inicio de análisis", extra={"file": source.name})
-    result = run_analysis(source, _run_settings(args, settings), detect=True)
+    ownership = _validate_input_file(args.ownership) if getattr(args, "ownership", None) else None
+    result = run_analysis(source, _run_settings(args, settings), detect=True, ownership=ownership)
     _print_profile(result)
     _print_detection(result)
     return EXIT_OK
@@ -141,7 +144,11 @@ def cmd_agents(args: argparse.Namespace, settings: Settings) -> int:
             print(f"Usando {llm.name}. Generación en CPU: puede tardar algunos minutos...")
             print("Fuente de cada agente (llm / fallback) y errores: agents/decision_log.jsonl")
     decide = {"all": approve_all, "none": reject_all}.get(args.approve, _interactive_decider)
-    report = run_agents(run_dir, settings, llm, decide)
+    import getpass
+
+    operator = {"user": getpass.getuser(), "role": "cli"}
+    decider = operator if args.approve == "interactive" else {**operator, "mode": f"--approve {args.approve}"}
+    report = run_agents(run_dir, settings, llm, decide, started_by=operator, decided_by=lambda: decider)
     _print_agents(report, run_dir)
     return EXIT_OK
 
@@ -213,7 +220,13 @@ def _print_agents(report: dict[str, Any], run_dir: Path) -> None:
     print("Respuesta:")
     for a in ro.get("actions", []):
         mode = "APROBACIÓN" if a["requires_human_approval"] else "auto"
-        done = "EJECUTADA (dry-run)" if a["action_id"] in executed else "-"
+        done = (
+            "CONDICIONADA (evidencia insuficiente)"
+            if a.get("blocked_reason")
+            else "EJECUTADA (dry-run, no aplicada)"
+            if a["action_id"] in executed
+            else "-"
+        )
         print(f"  {a['action_id']} {a['action_type']:<13} {mode:<10} {done}")
     est = report.get("response_time_estimates", {})
     if isinstance(est, dict) and est:
@@ -263,7 +276,9 @@ def cmd_enrich(args: argparse.Namespace, settings: Settings) -> int:
         if kind == "ip_done":
             print(f"  [{data['n']:>2}/{data['total']}] {data['ip']:<16} {data['verdict']}")
 
-    consent = {"confirmed": True, "via": "cli", "sources": sources}
+    import getpass
+
+    consent = {"confirmed": True, "via": "cli", "sources": sources, "by": {"user": getpass.getuser(), "role": "cli"}}
     try:
         report = enrich_run(
             run_dir, settings, runtime.launch(sources, client="idor-ir-cli"), sources, consent, progress
@@ -346,27 +361,43 @@ def _print_evidence(result: AnalysisResult) -> None:
         print(f"\n=== Evidencia ===\n{a['summary']}")
         return
     print("\n=== Evidencia forense (respuestas sección 3.1) ===")
-    ini = a["1_inicio_explotacion"]
+    assess = ev.get("assessment", {})
+    if assess:
+        print(f"Nivel de evidencia: {assess.get('level')} — {assess.get('statement')}")
+    ini = a.get("1_inicio") or a.get("1_inicio_explotacion", {})
+    first = ini.get("primera_actividad_sospechosa") or ini.get("primera_actividad_maliciosa")
     print(
-        f"1. Reconocimiento desde {'≤ ' if ini.get('inicio_censurado') else ''}{ini['primera_actividad_maliciosa']}; "
-        f"explotación (primer acceso 2xx) desde {ini['primer_acceso_exitoso_2xx']}. {ini['nota']}"
+        f"1. Actividad sospechosa desde {'≤ ' if ini.get('inicio_censurado') else ''}{first}; "
+        f"primer acceso 2xx desde {ini['primer_acceso_exitoso_2xx']}. {ini['nota']}"
     )
     print(f"2. Evidencia IDOR: {a['2_evidencia_idor']['respuesta']}. {a['2_evidencia_idor']['fundamento']}")
-    accessed = a["3_facturas_accedidas_indebidamente"]["unique_invoices_2xx"]
-    print(f"3. {prof.object_label_plural.capitalize()} accedidas (2xx, únicas): {accessed:,}")
+    scope3 = a.get("3_alcance_exposicion") or a.get("3_facturas_accedidas_indebidamente", {})
+    confirmed = scope3.get("accesos_indebidos_confirmados")
+    print(
+        f"3. {prof.object_label_plural.capitalize()} con 2xx (exposición potencial, únicas): "
+        f"{scope3['unique_invoices_2xx']:,}"
+        + (f" · accesos indebidos confirmados: {confirmed:,}" if confirmed is not None else " · sin corroborar")
+    )
     print(f"4. Secuencial: {a['4_patron_secuencial']['respuesta']}. {a['4_patron_secuencial']['fundamento']}")
     print(f"5. Automatizado: {a['5_automatizado']['respuesta']}. {a['5_automatizado']['fundamento']}")
     camp = a["6_campanas"]
-    print(f"6. Campañas: {camp['confirmadas']} confirmada(s), {camp['por_validar']} por validar")
+    print(
+        f"6. Campañas: {camp.get('corroboradas', 0)} corroborada(s), "
+        f"{camp.get('alta_confianza', camp.get('confirmadas', 0))} de alta confianza, "
+        f"{camp.get('por_validar', 0)} por validar"
+    )
     for c in ev["campaigns"]:
         fases = " | ".join(
             f"{p['start']}→{p['end']}: {p['median_per_day']:.0f}/día, éxito {p['success_ratio']:.0%}"
             for p in c["phases"]
         )
-        print(f"   {c['campaign_id']} [{c['status']}] {len(c['ips'])} IPs, {len(c['tokens'])} tokens · {fases}")
-    aff = a["7_usuarios_potencialmente_afectados"]
+        label = c.get("status_label", c["status"])
+        print(f"   {c['campaign_id']} [{label}] {len(c['ips'])} IPs, {len(c['tokens'])} tokens · {fases}")
+    aff = a.get("7_titulares_potencialmente_expuestos") or a.get("7_usuarios_potencialmente_afectados", {})
     by_scope = f"  por {prof.scope_label}: {aff['por_site_id']}" if prof.scope_param else ""
-    print(f"7. Afectados (límite superior): {aff['limite_superior']:,}{by_scope}")
+    print(
+        f"7. Titulares potencialmente expuestos (límite superior, sin confirmar): {aff['limite_superior']:,}{by_scope}"
+    )
     rm = ev["response_metrics"]
     if rm.get("ttd_reference"):
         ref = (
@@ -391,14 +422,101 @@ def cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
 
     from idor_ir.web.app import create_app
 
-    if args.host not in {"127.0.0.1", "localhost"} and settings.access_token is None:
-        print(
-            "Aviso: escucha en todas las interfaces sin IRP_ACCESS_TOKEN. En Docker publique el puerto solo en "
-            "127.0.0.1 (docker-compose.yml ya lo hace) o defina un token de acceso."
-        )
-    print(f"IR Platform en http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}")  # noqa: S104
-    uvicorn.run(create_app(settings), host=args.host, port=args.port, log_level="warning", server_header=False)
+    problem = serve_preflight(args.host, settings, bool(args.ssl_certfile))
+    if problem:
+        print(f"Error: {problem}", file=sys.stderr)
+        return EXIT_INPUT
+    if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
+        print("Error: --ssl-certfile y --ssl-keyfile van juntos.", file=sys.stderr)
+        return EXIT_INPUT
+    scheme = "https" if args.ssl_certfile else "http"
+    shown = "127.0.0.1" if args.host == "0.0.0.0" else args.host  # noqa: S104
+    print(f"IR Platform en {scheme}://{shown}:{args.port}")
+    proxies = settings.trusted_proxies.strip()
+    uvicorn.run(
+        create_app(settings), host=args.host, port=args.port, log_level="warning", server_header=False,
+        ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile,
+        proxy_headers=bool(proxies), forwarded_allow_ips=proxies or None,
+    )  # fmt: skip
     return EXIT_OK
+
+
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def serve_preflight(host: str, settings: Settings, tls: bool) -> str | None:
+    """Fail-closed: fuera de 127.0.0.1 la plataforma NO arranca sin autenticación fuerte.
+
+    Devuelve el motivo del rechazo, o None si se puede arrancar."""
+    from idor_ir.web.security import MIN_TOKEN_LENGTH
+
+    if host in LOOPBACK:
+        return None
+    access = settings.access_token.get_secret_value() if settings.access_token else ""
+    approver = settings.approver_token.get_secret_value() if settings.approver_token else ""
+    if not access:
+        return (
+            f"escuchar en {host} exige IRP_ACCESS_TOKEN (la interfaz quedaría abierta en la red). Defínalo en .env "
+            "o use --host 127.0.0.1."
+        )
+    for name, value in (("IRP_ACCESS_TOKEN", access), ("IRP_APPROVER_TOKEN", approver)):
+        if value and len(value) < MIN_TOKEN_LENGTH:
+            return f"{name} debe tener al menos {MIN_TOKEN_LENGTH} caracteres para escuchar fuera de 127.0.0.1."
+    if approver and approver == access:
+        return "IRP_APPROVER_TOKEN debe ser distinto de IRP_ACCESS_TOKEN."
+    if not tls and not settings.trusted_proxies.strip() and settings.cookie_secure is not True:
+        logger.warning(
+            "Servicio en %s sin TLS: use --ssl-certfile/--ssl-keyfile o un proxy TLS (IRP_TRUSTED_PROXIES) "
+            "si se accede desde otra máquina.", host,
+        )  # fmt: skip
+    return None
+
+
+def cmd_validate_detector(args: argparse.Namespace, settings: Settings) -> int:
+    """Mide el detector contra un banco etiquetado y deja un reporte JSON en output/validation/."""
+    import tempfile
+    from datetime import UTC, datetime
+
+    from idor_ir.detection.validation import validate
+
+    with tempfile.TemporaryDirectory(prefix="irp-validate-") as tmp:
+        report = validate(
+            seeds=args.seeds, users=args.users, target_fpr=args.target_fpr,
+            workdir=None if args.no_campaigns else Path(tmp),
+        )  # fmt: skip
+    out_dir = settings.output_dir / "validation"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"detector_validation_{datetime.now(tz=UTC):%Y%m%dT%H%M%SZ}.json"
+    path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print(f"Banco sintético etiquetado · {args.seeds} semilla(s) · umbral de señal = nivel medio (score >= 30)")
+    for key, variants in report["summary_at_medio"].items():
+        print(f"\nActor: {key}")
+        head = f"  {'variante':<24} {'precisión':>10} {'recall':>8} {'FPR':>8}"
+        print(f"{head}  umbral con FPR<={args.target_fpr} por semilla")
+        for name, v in variants.items():
+            p, r, f = v["precision_at_medio"]["mean"], v["recall_at_medio"]["mean"], v["fpr_at_medio"]["mean"]
+            cal = ", ".join(
+                "ninguno" if t is None else f"{t['threshold']:g} (recall {_num(t['recall'])})"
+                for t in v["calibrated_thresholds"]
+            )
+            print(f"  {name:<24} {_num(p):>10} {_num(r):>8} {_num(f):>8}  {cal}")
+    camp = report.get("campaign_layer")
+    if camp:
+        print("\nCapa de campañas (lo que guía la respuesta):")
+        print(f"  precisión de campañas priorizadas: {_num(camp['priority_precision_mean'])}")
+        print(f"  estilos de ataque en campaña priorizada por semilla: {camp['styles_in_priority_campaign_per_seed']} "
+              f"de {camp['attack_styles']}")  # fmt: skip
+        print(f"  estilos no detectados en ninguna campaña: {camp['styles_missed_entirely'] or 'ninguno'}")
+        print(f"  campañas falsas (cola por validar) por semilla: {camp['false_campaigns_per_seed']}")
+    print(f"\nReporte: {path}")
+    for line in report["limitations"]:
+        print(f"  · {line}")
+    return EXIT_OK
+
+
+def _num(x: float | None) -> str:
+    return "—" if x is None else f"{x:.3f}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -412,6 +530,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     analyze = sub.add_parser("analyze", help="Ingesta + métricas + detección IDOR + risk scoring")
     analyze.add_argument("--file", required=True, help="Ruta al CSV de logs")
+    analyze.add_argument(
+        "--ownership",
+        help="CSV opcional de la aplicación (objeto → titular) para CORROBORAR el IDOR: "
+        "columnas <object_param>, [<scope_param>], owner",
+    )
     _add_run_options(analyze)
     analyze.set_defaults(func=cmd_analyze)
 
@@ -448,12 +571,21 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="Interfaz web")
     serve.add_argument("--host", default="127.0.0.1", help="Interfaz de escucha (por defecto solo localhost)")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--ssl-certfile", help="Certificado TLS (PEM) para servir por HTTPS")
+    serve.add_argument("--ssl-keyfile", help="Clave privada TLS (PEM)")
     serve.set_defaults(func=cmd_serve)
 
     verify = sub.add_parser("verify", help="Verificar integridad de un run")
     verify.add_argument("--run", required=True, help="ID del run (carpeta en output/)")
     verify.add_argument("--file", help="Ruta al archivo original para re-verificar su hash")
     verify.set_defaults(func=cmd_verify)
+
+    val = sub.add_parser("validate-detector", help="Precisión/recall/FP del detector en un banco sintético etiquetado")
+    val.add_argument("--seeds", type=int, default=3, help="Repeticiones con semillas distintas (por defecto 3)")
+    val.add_argument("--users", type=int, default=400, help="Usuarios normales por ventana (por defecto 400)")
+    val.add_argument("--target-fpr", type=float, default=0.01, help="FPR objetivo para calibrar el umbral")
+    val.add_argument("--no-campaigns", action="store_true", help="No ejecutar la tubería completa (más rápido)")
+    val.set_defaults(func=cmd_validate_detector)
     return parser
 
 
@@ -461,6 +593,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level)
+    from idor_ir.agents.providers import configure_egress
+    from idor_ir.config import export_env_passthrough
+
+    export_env_passthrough()  # TI_ALLOWED_HOSTS del .env (anti-SSRF de TI)
+    configure_egress(settings)  # lista blanca de salida de los clientes LLM (anti-SSRF)
     try:
         return int(args.func(args, settings))
     except (InputError, SchemaError, AnalysisError) as exc:

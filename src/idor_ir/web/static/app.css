@@ -193,6 +193,7 @@ progress { width: 220px; accent-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .msg.typing::after { animation: none; } }
 .login-body { display: grid; place-items: center; min-height: 100vh; }
 .login { width: min(380px, 92vw); display: flex; flex-direction: column; gap: 12px; }
+.login label { display: flex; flex-direction: column; gap: 4px; }
 
 @media (max-width: 600px) {
   main { padding: 12px; }
@@ -241,3 +242,8 @@ hr.sep { border: 0; border-top: 1px solid var(--border); margin: 16px 0 8px; }
 .result-cell { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .profile-detected .btn { margin-top: 6px; align-self: flex-start; }
 .list .badge { white-space: nowrap; }
+/* Nivel de evidencia (señal → hipótesis → corroboración → impacto confirmado) */
+.assessment { border-left: 3px solid var(--warning); }
+.assessment h3 { margin: 0; font-size: 14px; }
+.assessment details { margin-top: 8px; }
+.assessment summary { cursor: pointer; }

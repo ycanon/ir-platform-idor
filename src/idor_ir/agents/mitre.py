@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from idor_ir.forensics.assessment import is_priority
 from idor_ir.profile import IncidentProfile
 
 ATTACK_VERSION = "ATT&CK Enterprise v16"
@@ -106,7 +107,9 @@ class MitreAssembly:
 
 
 def required_techniques(evidence: dict[str, Any]) -> list[RequiredTechnique]:
-    """Técnicas que la evidencia DEMUESTRA (campañas confirmadas). Reglas:
+    """Técnicas que sostiene la evidencia de las campañas priorizadas (hipótesis de alta confianza o corroboradas).
+
+    Reglas:
 
     - una fase con 0 % de éxito antes del primer acceso exitoso → T1595.002 (sondeo/reconocimiento);
     - respuestas 2xx obtenidas con credencial → T1078 (cuentas válidas);
@@ -117,7 +120,7 @@ def required_techniques(evidence: dict[str, Any]) -> list[RequiredTechnique]:
     objs = profile.object_label_plural
     out: dict[str, RequiredTechnique] = {}
     for c in evidence.get("campaigns", []):
-        if c.get("status") != "confirmada":
+        if not is_priority(c):
             continue
         cid, imp = c["campaign_id"], c.get("impact", {})
         recon = [p for p in c.get("phases", []) if p.get("success_ratio") == 0]
@@ -144,7 +147,8 @@ def required_techniques(evidence: dict[str, Any]) -> list[RequiredTechnique]:
                 "T1190",
                 "respuestas 2xx en el endpoint expuesto",
                 f"{cid}: {imp['success_responses_2xx']:,} respuestas 2xx en {profile.endpoint} entregaron "
-                f"{imp.get('unique_invoices_2xx', 0):,} {objs} sin comprobar su pertenencia (IDOR).",
+                f"{imp.get('unique_invoices_2xx', 0):,} {objs} distintos a las credenciales de la campaña; "
+                "compatible con falta de autorización a nivel de objeto (IDOR), pendiente de corroborar con ownership.",
             )
         tools = sorted({u["user_agent"].split("/")[0].split(" ")[0] for u in c.get("user_agents", [])
                         if u.get("category") != "navegador_u_otro"})  # fmt: skip

@@ -9,8 +9,12 @@
 <body class="login-body">
   <form class="card login" method="post" action="/login" autocomplete="off">
     <h1>◆ IR Platform</h1>
-    <p class="muted">Ingrese el token de acceso configurado en <code>IRP_ACCESS_TOKEN</code>.</p>
-    <input name="access_token" type="password" required maxlength="256" aria-label="Token de acceso">
+    <p class="muted">Ingrese su nombre (queda en la cadena de custodia) y el token de su rol:
+      <code>IRP_ACCESS_TOKEN</code> (analista){% if roles %} o <code>IRP_APPROVER_TOKEN</code> (aprobador){% endif %}.</p>
+    <label>Nombre o usuario
+      <input name="user" type="text" required minlength="2" maxlength="60" autocomplete="username" aria-label="Nombre o usuario"></label>
+    <label>Token
+      <input name="access_token" type="password" required maxlength="256" autocomplete="current-password" aria-label="Token de acceso"></label>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <button class="btn" type="submit">Entrar</button>
   </form>

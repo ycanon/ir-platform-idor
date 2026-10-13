@@ -60,7 +60,7 @@ def backtest_rules(
             "rule": f"{p.token_param} con > {threshold} {p.object_param} distintos en un día",
             "would_alert_on": str(hits["first_day"].min()) if hits.height else None,
             "other_tokens_alerted": other_tokens,
-            "note": f"{other_tokens} credenciales fuera de las campañas confirmadas también superan el umbral: "
+            "note": f"{other_tokens} credenciales fuera de las campañas priorizadas también superan el umbral: "
             "ajustar el umbral al comportamiento real por cliente antes de bloquear."
             if other_tokens
             else "Sin alertas sobre otros tokens.",

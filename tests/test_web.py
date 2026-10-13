@@ -141,7 +141,7 @@ def test_full_flow_analysis_agents_approvals(client: TestClient) -> None:
     assert done["status"] == "completed", done
     run_id = done["result"]["run_id"]
     summary = client.get(f"/api/runs/{run_id}").json()
-    assert summary["evidence"]["campaigns"][0]["status"] == "confirmada"
+    assert summary["evidence"]["campaigns"][0]["status"] == "alta_confianza"
     assert "USER-ID-attacker" not in client.get(f"/api/runs/{run_id}").text
     assert client.get(f"/api/runs/{run_id}/download/iocs.csv").status_code == 200
 
@@ -174,9 +174,87 @@ def test_access_token_login(synthetic_csv: Path, tmp_path: Path) -> None:  # noq
     c = TestClient(app)
     assert c.get("/api/runs").status_code == 401
     assert c.get("/", follow_redirects=False).status_code == 303
-    assert c.post("/login", data={"access_token": "wrong"}).status_code == 401
-    c.post("/login", data={"access_token": "s3cret-token-xyz"}, follow_redirects=False)
+    assert c.post("/login", data={"access_token": "wrong", "user": "ana"}).status_code == 401
+    assert c.post("/login", data={"access_token": "s3cret-token-xyz"}).status_code == 401  # sin nombre (auditoría)
+    r = c.post("/login", data={"access_token": "s3cret-token-xyz", "user": "Ana Analista"}, follow_redirects=False)
+    cookie = r.headers["set-cookie"]
+    assert "HttpOnly" in cookie and "s3cret" not in cookie and "Max-Age" in cookie
+    assert "Secure" not in cookie  # HTTP en el test: Secure solo por HTTPS o IRP_COOKIE_SECURE
     assert c.get("/api/runs").status_code == 200
+    cfg = c.get("/api/config").json()
+    assert cfg["user"] == "Ana Analista" and cfg["role"] == "operador_unico" and cfg["can_approve"]
+    # Una cookie alterada (rol cambiado sin la firma) no abre la API.
+    value = c.cookies.get("irp_session") or ""
+    c.cookies.set("irp_session", value.replace(".", "x.", 1))
+    assert c.get("/api/runs").status_code == 401
+
+
+def _login(c: TestClient, token: str, user: str) -> None:
+    c.post("/login", data={"access_token": token, "user": user}, follow_redirects=False)
+    c.get("/")  # cookie CSRF
+
+
+def test_rbac_analyst_cannot_approve_or_change_providers(synthetic_csv: Path, tmp_path: Path) -> None:  # noqa: F811
+    """Separación de funciones: el analista recomienda/ejecuta en dry-run; solo el aprobador decide y configura."""
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "synthetic.csv").write_bytes(synthetic_csv.read_bytes())
+    settings = Settings(
+        data_dir=data, output_dir=tmp_path / "out",
+        access_token="analyst-token-0123456789", approver_token="approver-token-0123456789",  # noqa: S106
+    )  # fmt: skip
+    analyst, approver = TestClient(create_app(settings)), None
+    _login(analyst, "analyst-token-0123456789", "ana")
+    assert analyst.get("/api/config").json()["role"] == "analista"
+    assert analyst.post("/api/llm/config", json={"provider": "ollama"}, headers=_csrf(analyst)).status_code == 403
+    assert analyst.post("/api/ti/config", json={}, headers=_csrf(analyst)).status_code == 403
+    job = analyst.post("/api/analyses", json={"dataset": "synthetic.csv"}, headers=_csrf(analyst)).json()
+    run_id = _wait(analyst, job["job_id"], {"completed", "failed"})["result"]["run_id"]
+    agents = analyst.post(f"/api/runs/{run_id}/agents", json={"use_llm": False}, headers=_csrf(analyst)).json()
+    waiting = _wait(analyst, agents["job_id"], {"awaiting_approval", "failed"})
+    first = waiting["pending_actions"][0]["action_id"]
+    url = f"/api/jobs/{agents['job_id']}/approvals"
+    assert analyst.post(url, json={"decisions": {first: "approve"}}, headers=_csrf(analyst)).status_code == 403
+
+    # El aprobador usa la MISMA app (misma clave de sesión) con su propia sesión.
+    approver = TestClient(analyst.app)
+    _login(approver, "approver-token-0123456789", "carlos ciso")
+    assert approver.get("/api/config").json()["role"] == "aprobador"
+    r = approver.post(url, json={"decisions": {first: "approve"}}, headers=_csrf(approver)).json()
+    assert r["decided_by"] == {"user": "carlos ciso", "role": "aprobador"}
+    assert _wait(analyst, agents["job_id"], {"completed", "failed"})["status"] == "completed"
+    report = analyst.get(f"/api/runs/{run_id}").json()["agents"]
+    assert report["started_by"] == {"user": "ana", "role": "analista"}
+    assert report["approvals_decided_by"]["user"] == "carlos ciso"
+    raw = (tmp_path / "out" / "custody_log.jsonl").read_text(encoding="utf-8")
+    events = [json.loads(line) for line in raw.splitlines()]
+    done = next(e for e in events if e["event"] == "agents_completed")
+    assert done["details"]["approvals_decided_by"] == {"user": "carlos ciso", "role": "aprobador"}
+    assert {"user": "ana", "role": "analista"} in [e["details"] for e in events if e["event"] == "session_started"]
+    assert "approver-token" not in raw and "analyst-token" not in raw
+
+
+def test_approver_token_must_differ(tmp_path: Path) -> None:
+    same = "same-token-0123456789"
+    with pytest.raises(ValueError, match="distinto"):
+        create_app(Settings(data_dir=tmp_path, output_dir=tmp_path / "o", access_token=same, approver_token=same))
+
+
+@pytest.mark.parametrize(
+    ("host", "access", "approver", "ok"),
+    [
+        ("127.0.0.1", None, None, True),  # local de un usuario
+        ("0.0.0.0", None, None, False),  # noqa: S104 - fail-closed: red sin token
+        ("0.0.0.0", "short", None, False),  # noqa: S104 - token débil
+        ("0.0.0.0", "a-long-access-token-123", "a-long-access-token-123", False),  # noqa: S104 - iguales
+        ("0.0.0.0", "a-long-access-token-123", None, True),  # noqa: S104
+    ],
+)
+def test_serve_is_fail_closed(tmp_path: Path, host: str, access: str | None, approver: str | None, ok: bool) -> None:
+    from idor_ir.cli import serve_preflight
+
+    settings = Settings(data_dir=tmp_path, output_dir=tmp_path / "o", access_token=access, approver_token=approver)
+    assert (serve_preflight(host, settings, tls=False) is None) is ok
 
 
 @pytest.mark.parametrize("access_token", [None, "s3cret-token-xyz"])
@@ -203,3 +281,12 @@ def test_metrics_token_blank_is_disabled(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, output_dir=tmp_path / "out", metrics_token="  ")  # noqa: S106 (valor en blanco)
     assert settings.metrics_token is None
     assert TestClient(create_app(settings)).get("/metrics").status_code == 200
+
+
+def test_ownership_source_is_allowlisted(client: TestClient) -> None:
+    """La fuente de ownership solo puede ser un CSV de la lista blanca de data/ y distinto del log analizado."""
+    h = _csrf(client)
+    body = {"dataset": "synthetic.csv", "ownership": "../../etc/passwd"}
+    assert client.post("/api/analyses", json=body, headers=h).status_code == 404
+    body = {"dataset": "synthetic.csv", "ownership": "synthetic.csv"}
+    assert client.post("/api/analyses", json=body, headers=h).status_code == 422

@@ -99,6 +99,7 @@ def actor_features(lf: pl.LazyFrame, key: ActorKey) -> pl.DataFrame:
     )
 
     base_df, neighbors_df = pl.collect_all([base, neighbors], engine="streaming")
+    sources = pl.lit(1) if key == "authtoken" else pl.col("unique_ips")
 
     return (
         base_df.join(neighbors_df, on=key, how="left")
@@ -110,8 +111,10 @@ def actor_features(lf: pl.LazyFrame, key: ActorKey) -> pl.DataFrame:
             # Intensidad normalizada por "fuente-día" (IPs distintas x días activos). Evita que una IP
             # legítima activa 2 meses parezca el doble de anómala que una activa 1 mes, y que una
             # subred con cientos de IPs normales parezca un solo actor gigante.
-            requests_per_source_day=pl.col("requests") / (pl.col("unique_ips") * pl.col("active_days")),
-            invoices_per_source_day=pl.col("unique_invoices") / (pl.col("unique_ips") * pl.col("active_days")),
+            # Para la CREDENCIAL no se divide por IPs: es una sola cuenta, y dividir premiaba la rotación de IPs
+            # (la validación con datos etiquetados mostró que una credencial repartida en 20 IPs pasaba como normal).
+            requests_per_source_day=pl.col("requests") / (sources * pl.col("active_days")),
+            invoices_per_source_day=pl.col("unique_invoices") / (sources * pl.col("active_days")),
         )
         .with_columns(
             invoice_density=pl.when(pl.col("unique_invoices") > 0)

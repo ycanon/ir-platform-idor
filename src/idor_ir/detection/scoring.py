@@ -50,11 +50,17 @@ def risk_level(score: float) -> str:
     return "bajo"
 
 
-def score_actors(features: pl.DataFrame, params: ScoringParams | None = None) -> pl.DataFrame:
-    """Agrega z-scores, score del modelo, puntos por regla, risk_score, nivel y razones."""
+def score_actors(
+    features: pl.DataFrame, params: ScoringParams | None = None, reference: pl.DataFrame | None = None
+) -> pl.DataFrame:
+    """Agrega z-scores, score del modelo, puntos por regla, risk_score, nivel y razones.
+
+    `reference` (opcional): features de una ventana de línea base. Si se da, la mediana/MAD y el Isolation Forest
+    se calculan con ella y los actores evaluados no influyen en su propia normalización (ver `validation.py`)."""
     p = params or ScoringParams()
-    df = add_model_columns(features)
-    df = df.with_columns(isolation_forest_scores(df))
+    ref = add_model_columns(reference) if reference is not None else None
+    df = add_model_columns(features, reference)
+    df = df.with_columns(isolation_forest_scores(df, reference=ref))
 
     df = df.with_columns(
         rule_volume=pl.col("z_requests") >= p.z_threshold,

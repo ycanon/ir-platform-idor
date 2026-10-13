@@ -26,7 +26,7 @@ from pydantic import SecretStr
 
 from ti_gateway.providers import PROVIDERS, Provider
 from ti_gateway.providers.base import HttpFactory, default_http
-from ti_gateway.util import BaseURLError, is_internal_url, validate_base_url, validate_ca_pem
+from ti_gateway.util import BaseURLError, egress_policy, is_internal_url, validate_base_url, validate_ca_pem
 
 
 def _int(env: Mapping[str, str], name: str, low: int, high: int) -> int | None:
@@ -67,7 +67,8 @@ class GatewayConfig:
             if (q := _int(env, prefix + "QUOTA", 0, 10_000_000)) is not None:
                 quota[pid] = q
             if PROVIDERS[pid].needs_url and env.get(prefix + "URL", "").strip():
-                urls[pid] = validate_base_url(env[prefix + "URL"])  # URL inválida → falla al arrancar
+                # URL inválida o host no autorizado (TI_ALLOWED_HOSTS) → falla al arrancar
+                urls[pid] = validate_base_url(env[prefix + "URL"], egress_policy(env))
             if (ca := env.get(prefix + "CA_BUNDLE", "").strip()) and PROVIDERS[pid].needs_url:
                 if not Path(ca).is_file():
                     raise ValueError(f"{prefix}CA_BUNDLE no apunta a un archivo")

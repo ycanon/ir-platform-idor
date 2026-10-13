@@ -31,6 +31,7 @@ from idor_ir.agents.context import as_prompt_block, build_context
 from idor_ir.agents.mitre import CATALOG, required_techniques
 from idor_ir.agents.review import build_facts, review_text
 from idor_ir.config import Settings
+from idor_ir.forensics.assessment import is_priority
 from idor_ir.forensics.integrity import CustodyLog, atomic_write_text
 from idor_ir.profile import IncidentProfile
 
@@ -68,8 +69,8 @@ def question_bank(evidence: dict[str, Any]) -> list[Question]:
     prof = IncidentProfile.from_evidence(evidence)
     objs = prof.object_label_plural
     camps = evidence.get("campaigns", [])
-    conf = next((c for c in camps if c["status"] == "confirmada"), None)
-    pend = next((c for c in camps if c["status"] != "confirmada"), None)
+    conf = next((c for c in camps if is_priority(c)), None)
+    pend = next((c for c in camps if not is_priority(c)), None)
     rm = evidence.get("response_metrics", {})
     qs: list[Question] = []
     if conf is None:

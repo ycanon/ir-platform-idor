@@ -39,15 +39,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validar docker-compose.yml
+        # Valores aleatorios generados en cada ejecución: no hay tokens ni contraseñas en el repositorio.
         run: |
+          if docker compose config -q 2>/dev/null; then echo "Compose debe exigir IRP_ACCESS_TOKEN"; exit 1; fi
+          export IRP_ACCESS_TOKEN="$(openssl rand -hex 24)"
           docker compose config -q
-          IRP_METRICS_TOKEN=ci GRAFANA_ADMIN_PASSWORD=ci docker compose --profile observabilidad --profile ollama config -q
+          IRP_METRICS_TOKEN="$(openssl rand -hex 16)" GRAFANA_ADMIN_PASSWORD="$(openssl rand -hex 16)" \
+            docker compose --profile observabilidad --profile ollama config -q
       - name: Construir imagen
         run: docker build -t ir-platform:ci .
       - name: Prueba de humo (healthcheck)
         run: |
           mkdir -p data output && sudo chown -R 10001:10001 data output
+          # Fail-closed: sin token la plataforma se niega a escuchar en 0.0.0.0.
+          if docker run --rm ir-platform:ci; then echo "Arrancó sin IRP_ACCESS_TOKEN"; exit 1; fi
+          export IRP_ACCESS_TOKEN="$(openssl rand -hex 24)"
           docker run -d --name irp -p 127.0.0.1:8000:8000 -v "$PWD/data:/data" -v "$PWD/output:/output" \
+            -e IRP_ACCESS_TOKEN \
             --read-only --tmpfs /tmp:uid=10001,gid=10001,mode=0700 --tmpfs /home/irp:uid=10001,gid=10001,mode=0700 \
             --cap-drop ALL --security-opt no-new-privileges:true ir-platform:ci
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/api/health && exit 0; sleep 2; done

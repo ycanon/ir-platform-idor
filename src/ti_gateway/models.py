@@ -33,6 +33,21 @@ class SourceResult(BaseModel):
     cached: bool = False
 
 
+class Consent(BaseModel):
+    """Autorización EXPLÍCITA para enviar un indicador a terceros (obligatoria en `ti_lookup`).
+
+    Un cliente MCP (incluido un agente LLM) no puede consultar sin ella: queda auditada junto a cada consulta."""
+
+    model_config = {"extra": "forbid"}
+
+    granted: Literal[True] = Field(description="Debe ser true: el usuario confirmó el envío a las fuentes externas")
+    run_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,80}$", description="Caso o run que justifica la consulta")
+    granted_by: str = Field(
+        min_length=2, max_length=120, pattern=r"^[^\x00-\x1f\x7f]+$", description="Quién autorizó (usuario y rol)"
+    )
+    purpose: str = Field(min_length=5, max_length=300, pattern=r"^[^\x00-\x1f\x7f]+$", description="Para qué")
+
+
 class LookupResult(BaseModel):
     indicator: str
     indicator_type: IndicatorType

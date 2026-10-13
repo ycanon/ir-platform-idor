@@ -195,6 +195,38 @@ def is_local_host(host: str) -> bool:
     return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
+# --------------------------------------------------------------------------- control de salida (anti-SSRF)
+_EGRESS: Any = None
+
+
+def configure_egress(settings: Any) -> Any:
+    """Fija la política de salida de los clientes LLM (llamado al crear la app web y en la CLI)."""
+    from egress_guard import DEFAULT_LOCAL_HOSTS, EgressPolicy, parse_hosts
+
+    global _EGRESS
+    fixed = frozenset(urlsplit(s.base_url).hostname or "" for s in PROVIDERS.values() if s.base_url) - {""}
+    _EGRESS = EgressPolicy(
+        allowed_hosts=DEFAULT_LOCAL_HOSTS + parse_hosts(getattr(settings, "llm_allowed_hosts", "")),
+        fixed_hosts=fixed,
+        env_var="IRP_LLM_ALLOWED_HOSTS",
+    ).with_hosts(urlsplit(str(settings.ollama_base_url)).hostname)
+    return _EGRESS
+
+
+def egress_policy() -> Any:
+    if _EGRESS is None:
+        from idor_ir.config import get_settings
+
+        return configure_egress(get_settings())
+    return _EGRESS
+
+
+def guarded_transport() -> httpx.BaseTransport:
+    from egress_guard import GuardedTransport
+
+    return GuardedTransport(egress_policy())
+
+
 def validate_base_url(url: str) -> str:
     """URL editable por el usuario: http(s), con host, sin credenciales, query ni fragmento."""
     url = url.strip()
@@ -211,6 +243,7 @@ def validate_base_url(url: str) -> str:
         raise ValueError("Puerto inválido") from exc
     if parts.scheme == "http" and not is_local_host(parts.hostname):
         raise ValueError("Use https:// para hosts fuera de la red local (http solo para localhost/IP privada)")
+    egress_policy().check_url(url)  # EgressError es ValueError: host fuera de la lista blanca del administrador
     return url.rstrip("/")
 
 
@@ -227,7 +260,7 @@ def _client(transport: httpx.BaseTransport | None) -> httpx.Client:
     return httpx.Client(
         timeout=httpx.Timeout(READ_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
         follow_redirects=False,  # una redirección podría reenviar la API key a otro host
-        transport=transport,
+        transport=transport or guarded_transport(),  # anti-SSRF: lista blanca + IP verificada y fijada
     )
 
 

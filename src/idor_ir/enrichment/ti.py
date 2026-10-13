@@ -73,12 +73,21 @@ def enrich_run(
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     targets, skipped = select_ips(evidence)
     started = time.perf_counter()
+    by = consent.get("by") or {}
+    gateway_consent = {  # lo exige la herramienta MCP ti_lookup y queda en la auditoría del gateway
+        "granted": bool(consent.get("confirmed")),
+        "run_id": run_dir.name,
+        "granted_by": f"{by.get('user', 'desconocido')} ({by.get('role', consent.get('via', 'web'))})"[:120],
+        "purpose": "Reputación de IPs públicas del Top 20 del incidente (respuesta a incidentes)",
+    }
+    if not gateway_consent["granted"]:
+        raise TIError("Falta la confirmación del envío de IPs a las fuentes externas")
 
     async def work(gw: GatewaySession) -> list[dict[str, Any]]:
         out = []
         for n, row in enumerate(targets, start=1):
             emit("lookup", {"ip": row["ip"], "n": n, "total": len(targets)})
-            lookup = await gw.lookup(row["ip"], "ip", sources)
+            lookup = await gw.lookup(row["ip"], "ip", sources, gateway_consent)
             out.append(
                 {
                     "ip": lookup["indicator"],

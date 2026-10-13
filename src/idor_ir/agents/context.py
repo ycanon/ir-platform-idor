@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from idor_ir.forensics.assessment import STATUS_PENDING, status_label
 from idor_ir.forensics.evidence import auth_statement
 from idor_ir.profile import IncidentProfile
 
@@ -122,7 +123,7 @@ def verified_facts(evidence: dict[str, Any]) -> list[str]:
     facts: list[str] = []
     for c in evidence.get("campaigns", []):
         imp, cid = c["impact"], c["campaign_id"]
-        status = "confirmada" if c["status"] == "confirmada" else "por validar"
+        status = status_label(c["status"])
         facts.append(
             f"{cid} ({status}): {len(c['tokens'])} credenciales ({profile.token_param}) usadas desde {len(c['ips'])} "
             f"IPs; el servidor respondió 2xx {imp['success_responses_2xx']:,} veces."
@@ -165,7 +166,9 @@ RULES = [
 
 
 def _status(value: str) -> str:
-    return "confirmada" if value == "confirmada" else "por validar (validar con AppSec/QA antes de actuar)"
+    if value == STATUS_PENDING:
+        return "por validar (validar con AppSec/QA antes de actuar)"
+    return status_label(value)
 
 
 def fichas(ctx: dict[str, Any], detail: bool = True) -> dict[str, Any]:

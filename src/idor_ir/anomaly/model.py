@@ -34,13 +34,17 @@ MODEL_FEATURES: tuple[str, ...] = (
 )
 
 
-def robust_z(values: pl.Series) -> pl.Series:
-    """z-score robusto. Si el MAD es 0 (datos casi constantes) usa la desviación media absoluta."""
+def robust_z(values: pl.Series, reference: pl.Series | None = None) -> pl.Series:
+    """z-score robusto. Si el MAD es 0 (datos casi constantes) usa la desviación media absoluta.
+
+    Con `reference`, la mediana y el MAD salen de esa ventana (línea base) y no de los datos evaluados: así el
+    atacante no participa en su propia normalización (validación fuera de muestra)."""
     x = values.cast(pl.Float64).fill_null(0.0).to_numpy()
     if x.size == 0:
         return pl.Series(values.name, [], dtype=pl.Float64)
-    median = float(np.median(x))
-    deviation = np.abs(x - median)
+    ref = x if reference is None else reference.cast(pl.Float64).fill_null(0.0).to_numpy()
+    median = float(np.median(ref))
+    deviation = np.abs(ref - median)
     mad = float(np.median(deviation))
     if mad > 0:
         z = _MAD_CONSTANT * (x - median) / mad
@@ -50,27 +54,40 @@ def robust_z(values: pl.Series) -> pl.Series:
     return pl.Series(values.name, z)
 
 
-def add_model_columns(features: pl.DataFrame) -> pl.DataFrame:
+def add_model_columns(features: pl.DataFrame, reference: pl.DataFrame | None = None) -> pl.DataFrame:
     """Agrega columnas log1p y z-scores robustos de intensidad de volumen y de enumeración."""
+    ref = reference
     return features.with_columns(
         log_requests_per_source_day=pl.col("requests_per_source_day").log1p(),
         log_invoices_per_source_day=pl.col("invoices_per_source_day").log1p(),
         log_unique_tokens=pl.col("unique_tokens").log1p(),
         log_unique_ips=pl.col("unique_ips").log1p(),
         log_unique_user_agents=pl.col("unique_user_agents").log1p(),
-        z_requests=robust_z(features["requests_per_source_day"]),
-        z_unique_invoices=robust_z(features["invoices_per_source_day"]),
+        z_requests=robust_z(
+            features["requests_per_source_day"], None if ref is None else ref["requests_per_source_day"]
+        ),
+        z_unique_invoices=robust_z(
+            features["invoices_per_source_day"], None if ref is None else ref["invoices_per_source_day"]
+        ),
     )
 
 
-def isolation_forest_scores(features: pl.DataFrame, random_state: int = 42) -> pl.Series:
-    """Score de anomalía normalizado a [0, 1] (1 = más anómalo). Determinista por `random_state`."""
-    if features.height < 8:  # muy pocos actores para un bosque útil
+def isolation_forest_scores(
+    features: pl.DataFrame, random_state: int = 42, reference: pl.DataFrame | None = None
+) -> pl.Series:
+    """Score de anomalía normalizado a [0, 1] (1 = más anómalo). Determinista por `random_state`.
+
+    Sin `reference` (análisis forense de un único log) el bosque se ajusta y evalúa sobre los mismos actores:
+    es un ranking relativo, no una probabilidad. Con `reference` (ventana de línea base, ya con las columnas de
+    `add_model_columns`) se ajusta ahí y se evalúa fuera de muestra; la escala usa el rango de la referencia."""
+    train = features if reference is None else reference
+    if train.height < 8 or features.height == 0:  # muy pocos actores para un bosque útil
         return pl.Series("if_score", [0.0] * features.height)
-    matrix = features.select(MODEL_FEATURES).fill_null(0.0).to_numpy()
     model = IsolationForest(n_estimators=200, contamination="auto", random_state=random_state)
-    model.fit(matrix)
-    raw = -model.score_samples(matrix)  # mayor = más anómalo
-    span = float(raw.max() - raw.min())
-    normalized = (raw - raw.min()) / span if span > 0 else np.zeros_like(raw)
+    model.fit(train.select(MODEL_FEATURES).fill_null(0.0).to_numpy())
+    raw = -model.score_samples(features.select(MODEL_FEATURES).fill_null(0.0).to_numpy())  # mayor = más anómalo
+    base = raw if reference is None else -model.score_samples(train.select(MODEL_FEATURES).fill_null(0.0).to_numpy())
+    low, high = float(base.min()), float(base.max())
+    span = high - low
+    normalized = np.clip((raw - low) / span, 0.0, 1.0) if span > 0 else np.zeros_like(raw)
     return pl.Series("if_score", normalized)

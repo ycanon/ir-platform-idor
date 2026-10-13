@@ -48,6 +48,7 @@ from idor_ir.agents.schemas import (
     TriageDraft,
     TriageOutput,
 )
+from idor_ir.forensics.assessment import is_priority
 
 # Presupuesto de tokens de salida por agente (solo CPU: ~4-5 tokens/s con contexto). Los borradores son más
 # pequeños que las salidas completas de antes (punto 7): el modelo ya no escribe datos que el código conoce.
@@ -281,8 +282,9 @@ def build_graph(llm: LLMClient | None, evidence: dict[str, Any], actions_dir: Pa
         return {"response": ro.model_dump(), "decision_log": [entry]}
 
     def policy_node(state: AgentState) -> dict[str, Any]:
-        pending = {c["campaign_id"] for c in evidence.get("campaigns", []) if c["status"] != "confirmada"}
-        ro, overrides = apply_policy(ResponseOutput.model_validate(state["response"]), pending)
+        pending = {c["campaign_id"] for c in evidence.get("campaigns", []) if not is_priority(c)}
+        level = (evidence.get("assessment") or {}).get("level", "hipótesis")
+        ro, overrides = apply_policy(ResponseOutput.model_validate(state["response"]), pending, level)
         need = [a.action_id for a in ro.actions if a.requires_human_approval]
         entry = _log(
             "policy",
@@ -328,13 +330,17 @@ def build_graph(llm: LLMClient | None, evidence: dict[str, Any], actions_dir: Pa
     def execute_node(state: AgentState) -> dict[str, Any]:
         actions = [ResponseAction.model_validate(a) for a in state["response"]["actions"]]
         approvals = state.get("approvals", {})
-        to_run = [a for a in actions if not a.requires_human_approval or approvals.get(a.action_id) == "approve"]
+        allowed = [a for a in actions if not a.requires_human_approval or approvals.get(a.action_id) == "approve"]
+        # Condicionadas por evidencia insuficiente: no se ejecutan aunque se hayan aprobado.
+        to_run = [a for a in allowed if not a.blocked_reason]
+        held = [a.action_id for a in allowed if a.blocked_reason]
         results = execute(to_run, evidence, actions_dir, dry_run=dry_run)
         entry = _log(
             "execute",
             source="code",
             dry_run=dry_run,
-            decision=f"{len(results)} acciones ejecutadas en dry-run: {', '.join(r['action_id'] for r in results)}",
+            decision=f"{len(results)} acciones ejecutadas en dry-run: {', '.join(r['action_id'] for r in results)}"
+            + (f"; condicionadas sin ejecutar: {', '.join(held)}" if held else ""),
         )
         return {"executed": results, "decision_log": [entry]}
 

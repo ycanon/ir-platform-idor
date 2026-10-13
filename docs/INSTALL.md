@@ -89,7 +89,15 @@ explícita para enviar el contexto agregado.
 python -m idor_ir serve                          # interfaz web → http://127.0.0.1:8000
 python -m idor_ir analyze --file data/<log>.csv  # análisis desde la CLI
 python -m idor_ir llm-check                      # comprueba la conexión con el LLM
+python -m idor_ir validate-detector              # precisión/recall/FP del detector (banco sintético)
 ```
+
+**Acceso desde otra máquina** (fail-closed): `serve --host 0.0.0.0` solo arranca con `IRP_ACCESS_TOKEN` de al menos
+16 caracteres en `.env`; para separar funciones defina además `IRP_APPROVER_TOKEN` (distinto). Sirva por HTTPS con
+`--ssl-certfile cert.pem --ssl-keyfile key.pem` o detrás de un proxy TLS (`IRP_TRUSTED_PROXIES`, `IRP_COOKIE_SECURE=true`).
+
+**Ollama u otro LLM en otra máquina de la red:** agregue su host a `IRP_LLM_ALLOWED_HOSTS` (control anti-SSRF); el
+host de `IRP_OLLAMA_BASE_URL` ya queda autorizado.
 
 ## 5. Verificar la instalación
 

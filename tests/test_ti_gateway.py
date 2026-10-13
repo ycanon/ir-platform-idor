@@ -237,10 +237,24 @@ async def test_mcp_tools_contract(tmp_path: Path) -> None:
         catalog = listed.structuredContent["result"]  # type: ignore[index]
         assert len(catalog) == 8 and all(s["configured"] for s in catalog if s["id"] != "misp")
         assert not any(v in json.dumps(catalog) for v in KEYS.values())
-        looked = await client.call_tool("ti_lookup", {"indicator": IP, "sources": ["virustotal", "ipinfo"]})
+        # Sin consentimiento (o con granted=false) la herramienta se niega: un agente no puede consultar por su cuenta.
+        assert "consent" in tools["ti_lookup"].inputSchema["required"]
+        denied = await client.call_tool("ti_lookup", {"indicator": IP, "sources": ["virustotal"]})
+        assert denied.isError
+        fake = {**CONSENT, "granted": False}
+        assert (await client.call_tool("ti_lookup", {"indicator": IP, "consent": fake})).isError
+        args = {"indicator": IP, "sources": ["virustotal", "ipinfo"], "consent": CONSENT}
+        looked = await client.call_tool("ti_lookup", args)
         assert looked.structuredContent["verdict"] == "malicioso"  # type: ignore[index]
-        private = await client.call_tool("ti_lookup", {"indicator": "192.168.1.10"})
+        private = await client.call_tool("ti_lookup", {"indicator": "192.168.1.10", "consent": CONSENT})
         assert private.isError and "privada" in private.content[0].text  # type: ignore[union-attr]
+    audit = [json.loads(line) for line in (tmp_path / "state" / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    lookups = [e for e in audit if e["event"] == "lookup"]
+    assert lookups and lookups[-1]["details"]["consent"]["granted_by"] == CONSENT["granted_by"]
+
+
+CONSENT = {"granted": True, "run_id": "20261013T000000Z-abc123", "granted_by": "carlos (aprobador)",
+           "purpose": "Reputación de IPs del Top 20"}  # fmt: skip
 
 
 @pytest.fixture
@@ -303,6 +317,10 @@ def test_misp_requires_url_and_validates_version(tmp_path: Path) -> None:
     assert info.needs_url and info.base_url == MISP_URL and info.url_env == "TI_MISP_URL"
 
 
+# Hosts propios autorizados por el administrador (anti-SSRF): sin esto, la configuración se rechaza al arrancar.
+LAB = {"TI_ALLOWED_HOSTS": "misp.local,10.0.0.70,misp.comunidad.example"}
+
+
 def test_base_url_validation() -> None:
     from ti_gateway.util import BaseURLError, validate_base_url
 
@@ -314,10 +332,12 @@ def test_base_url_validation() -> None:
                 "https://misp.local#x", "misp.local", "http://8.8.8.8"):  # fmt: skip
         with pytest.raises(BaseURLError):
             validate_base_url(bad)
-    cfg = GatewayConfig.from_env({"TI_MISP_URL": "https://misp.local/", "TI_MISP_API_KEY": "k" * 20})
+    cfg = GatewayConfig.from_env({**LAB, "TI_MISP_URL": "https://misp.local/", "TI_MISP_API_KEY": "k" * 20})
     assert cfg.urls == {"misp": "https://misp.local"}
     with pytest.raises(BaseURLError):
         GatewayConfig.from_env({"TI_MISP_URL": "http://misp.example.com"})
+    with pytest.raises(BaseURLError, match="TI_ALLOWED_HOSTS"):  # host válido pero no autorizado (anti-SSRF)
+        GatewayConfig.from_env({"TI_MISP_URL": "https://misp.local/"})
 
 
 # --------------------------------------------------------------------------- diagnóstico de conexión y CA propia
@@ -379,8 +399,8 @@ def test_ca_pem_validation_and_gateway_config(tmp_path: Path) -> None:
 def test_tls_verification_can_be_skipped_only_for_internal_instances() -> None:
     from ti_gateway.util import BaseURLError
 
-    cfg = GatewayConfig.from_env({"TI_MISP_URL": "https://10.0.0.70", "TI_MISP_TLS_VERIFY": "0"})
+    cfg = GatewayConfig.from_env({**LAB, "TI_MISP_URL": "https://10.0.0.70", "TI_MISP_TLS_VERIFY": "0"})
     assert cfg.tls_insecure == {"misp"} and cfg.build_providers()["misp"].tls_verify is False
-    assert GatewayConfig.from_env({"TI_MISP_URL": "https://10.0.0.70"}).build_providers()["misp"].tls_verify
+    assert GatewayConfig.from_env({**LAB, "TI_MISP_URL": "https://10.0.0.70"}).build_providers()["misp"].tls_verify
     with pytest.raises(BaseURLError):  # nunca hacia Internet
-        GatewayConfig.from_env({"TI_MISP_URL": "https://misp.comunidad.example", "TI_MISP_TLS_VERIFY": "0"})
+        GatewayConfig.from_env({**LAB, "TI_MISP_URL": "https://misp.comunidad.example", "TI_MISP_TLS_VERIFY": "0"})

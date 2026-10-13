@@ -48,7 +48,9 @@ Los límites se pueden ajustar por fuente (planes premium) desde la pestaña Con
 - **Diagnóstico:** si no conecta, el mensaje indica la causa: certificado autofirmado o de CA no reconocida,
   certificado que no corresponde a la IP/nombre, puerto que no habla HTTPS, conexión rechazada, tiempo de espera,
   proxy o nombre que no resuelve.
-- **Validación de la URL:** `https://` hacia cualquier servidor; `http://` solo hacia la red interna (IP privada o un
+- **Lista blanca:** el host de la URL debe estar en `TI_ALLOWED_HOSTS` (lo define el administrador por entorno; la
+  interfaz no puede ampliarla). Ejemplo: `TI_ALLOWED_HOSTS=misp.example.internal,10.0.0.70`.
+- **Validación de la URL:** `https://` hacia cualquier servidor autorizado; `http://` solo hacia la red interna (IP privada o un
   nombre que resuelve únicamente a IPs privadas), porque por Internet la clave viajaría en claro. Sin
   usuario/contraseña, parámetros ni fragmento. No se siguen redirecciones (la clave no se reenvía a otro host).
 - **Veredicto [DEC]:** atributo con `to_ids` → *malicioso*; solo atributos de contexto → *sospechoso*; coincidencia
@@ -61,7 +63,7 @@ Los límites se pueden ajustar por fuente (planes premium) desde la pestaña Con
 | Herramienta | Qué hace | ¿Sale a Internet? |
 |---|---|---|
 | `ti_list_sources` | Catálogo: fuentes, tipos de indicador, si tienen clave, límites y consumo | No |
-| `ti_lookup(indicator, indicator_type?, sources?)` | Veredicto agregado, contexto de red y detalle por fuente | Sí (salvo caché) |
+| `ti_lookup(indicator, consent, indicator_type?, sources?)` | Veredicto agregado, contexto de red y detalle por fuente. `consent` = `{granted: true, run_id, granted_by, purpose}` es **obligatorio** | Sí (salvo caché) |
 | `ti_check_source(source)` | Valida la clave configurada con una llamada real | Sí |
 | `ti_quota_status` | Consumo del periodo por fuente | No |
 
@@ -80,9 +82,15 @@ falso positivo.
 - **HTTPS con verificación TLS, sin seguir redirecciones**, con timeouts y respuestas normalizadas y acotadas.
   Los textos de terceros (nombres de pulsos, etiquetas) se limpian de caracteres de control/bidi y se marcan
   como datos, nunca como instrucciones.
-- **Consentimiento:** la herramienta `ti_lookup` se marca como `openWorldHint`, pero esa marca es una sugerencia
-  para el cliente. La confirmación la pide el cliente: la IR Platform exige la casilla de autorización y
-  Claude Desktop pide aprobación por herramienta.
+- **Consentimiento obligatorio en el servidor:** `ti_lookup` rechaza la consulta sin un `consent` válido
+  (`granted: true`, caso/run, quién autorizó y para qué) y lo guarda en la auditoría encadenada junto al indicador y
+  las fuentes. No depende de que el cliente lo pida: un agente o un cliente MCP no puede consultar por su cuenta. En
+  la IR Platform el consentimiento lo da un usuario con rol **aprobador** (casilla de autorización) y queda también en
+  la cadena de custodia del caso. Las instrucciones del servidor indican a los clientes que nunca lo inventen.
+- **Salida de red controlada (anti-SSRF):** cada conexión pasa por `egress_guard`: solo hosts de las APIs públicas
+  fijas del código (que deben resolver a IPs públicas) o de `TI_ALLOWED_HOSTS` (instancias propias como MISP); se
+  resuelve el DNS en cada conexión, se rechazan link-local, metadatos de nube y direcciones reservadas, y se conecta
+  a la IP verificada (anti DNS rebinding).
 - **Estado compartido** en `TI_DATA_DIR`:
   - `cache.json` (24 h) y `quota.json`, con un candado de archivo, para que varias copias del gateway no
     superen juntas un cupo;
@@ -103,6 +111,7 @@ absoluta al intérprete del entorno virtual del proyecto (`.venv/bin/python` en 
       "env": {
         "TI_DATA_DIR": "/ruta/al/proyecto/output/ti_gateway",
         "TI_CLIENT_NAME": "claude-desktop",
+        "TI_ALLOWED_HOSTS": "misp.example.internal",
         "TI_ABUSEIPDB_API_KEY": "<su clave>",
         "TI_GREYNOISE_API_KEY": "<su clave>"
       }

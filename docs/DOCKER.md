@@ -64,7 +64,11 @@ Variables relevantes en `.env` (las rutas `IRP_DATA_DIR` / `IRP_OUTPUT_DIR` no a
 | Variable | Para qué | Por defecto |
 |---|---|---|
 | `IRP_OLLAMA_BASE_URL` | Servidor Ollama visto **desde el contenedor** | `http://host.docker.internal:11434` (Ollama del anfitrión) |
-| `IRP_ACCESS_TOKEN` | Login de la interfaz (recomendado) | vacío |
+| `IRP_ACCESS_TOKEN` | **Obligatorio** (≥ 16 caracteres). Login de la interfaz, rol analista. Dentro del contenedor la app escucha en `0.0.0.0`: sin token, `docker compose up` se detiene (fail-closed) | — |
+| `IRP_APPROVER_TOKEN` | Rol aprobador (aprobar acciones, cambiar proveedores LLM/TI, enviar datos fuera de la red). Debe ser distinto; vacío = operador único | vacío |
+| `IRP_LLM_ALLOWED_HOSTS` | Hosts propios que la UI puede usar como URL de LLM (anti-SSRF). Siempre incluidos: `localhost`, `host.docker.internal`, `ollama` y el host de `IRP_OLLAMA_BASE_URL` | vacío |
+| `TI_ALLOWED_HOSTS` | Host de su MISP u otra instancia propia (anti-SSRF); sin él, la URL se rechaza | vacío |
+| `IRP_COOKIE_SECURE`, `IRP_TRUSTED_PROXIES` | Detrás de un proxy TLS: `true` y la IP del proxy | vacío |
 | `IRP_METRICS_TOKEN` | Token de **solo lectura** para que Prometheus lea `/metrics` (obligatorio con `observabilidad`) | vacío |
 | `GRAFANA_ADMIN_PASSWORD` | Clave del usuario `admin` de Grafana (obligatoria con `observabilidad`) | vacío |
 | `IRP_PORT`, `PROMETHEUS_PORT`, `GRAFANA_PORT` | Puertos locales si 8000/9090/3000 están ocupados | 8000 / 9090 / 3000 |
@@ -143,6 +147,7 @@ docker compose up -d --build                     # tras actualizar el código
 | Analizar un log desde la interfaz | Carpeta nueva en `./output` |
 | `docker compose exec irp python -m idor_ir llm-check` | LLM accesible y esquemas aceptados (si configuró uno) |
 | `curl -i http://127.0.0.1:8000/metrics` (con `IRP_METRICS_TOKEN`) | `401` sin el token |
+| `curl -i http://127.0.0.1:8000/api/runs` | `401` sin sesión (el login pide nombre y token) |
 | `docker compose exec irp touch /x` | `Read-only file system` |
 
 ## 5. Redes internas, MISP y certificados
@@ -157,7 +162,7 @@ docker compose up -d --build                     # tras actualizar el código
   compilación; no queda en ninguna capa de la imagen.
 
   ```bash
-  docker build --secret id=build_ca,src=/ruta/ca-corporativa.pem -t ir-platform:0.13.0 .
+  docker build --secret id=build_ca,src=/ruta/ca-corporativa.pem -t ir-platform:0.14.0 .
   docker compose up -d
   ```
 
@@ -177,7 +182,8 @@ docker compose up -d --build                     # tras actualizar el código
 | `/metrics` autenticado | Con `IRP_METRICS_TOKEN`, `/metrics` exige `Authorization: Bearer` aunque la interfaz no tenga login; ese token no abre la API |
 | Grafana cerrado | Sin registro ni acceso anónimo, sin telemetría ni descarga de plugins |
 | Versiones fijadas | Python `3.12-slim-bookworm`, Prometheus `v3.1.0`, Grafana `11.4.0`; Ollama configurable con `OLLAMA_IMAGE` |
-| Healthcheck | `/api/health` cada 30 s |
+| Healthcheck | `/api/health` cada 30 s (ruta pública, sin datos) |
+| Autenticación obligatoria | Compose exige `IRP_ACCESS_TOKEN` y la app no arranca en `0.0.0.0` sin token de ≥ 16 caracteres |
 
 ## 7. Problemas frecuentes
 
@@ -190,3 +196,5 @@ docker compose up -d --build                     # tras actualizar el código
 | `environment variable "IRP_METRICS_TOKEN" required by secret ... is not set` | Falta `IRP_METRICS_TOKEN` o `GRAFANA_ADMIN_PASSWORD` en `.env` al usar el perfil `observabilidad` |
 | Análisis lento | Las carpetas compartidas desde Windows o macOS hacia la VM de Docker son más lentas que un disco Linux nativo; asigne más memoria o clone el repositorio dentro del sistema de archivos de WSL2 |
 | Puerto ocupado | Cambie `IRP_PORT`, `PROMETHEUS_PORT` o `GRAFANA_PORT` en `.env` |
+| `required variable IRP_ACCESS_TOKEN is missing a value` / el contenedor sale con `exige IRP_ACCESS_TOKEN` | Defina `IRP_ACCESS_TOKEN` (≥ 16 caracteres) en `.env` y vuelva a ejecutar `docker compose up -d` |
+| «Host no autorizado para conexiones salientes» al configurar Ollama o MISP | Agregue el host a `IRP_LLM_ALLOWED_HOSTS` o `TI_ALLOWED_HOSTS` en `.env` y recree el contenedor |

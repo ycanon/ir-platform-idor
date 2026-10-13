@@ -211,11 +211,17 @@ def test_web_synthetic_dataset_sends_nothing(synthetic_csv: Path, web: tuple[Tes
     assert any(ch["check"] == "artefacto enrichment/ti_enrichment.json" and ch["ok"] for ch in checks)
 
 
-def test_web_misp_url_is_validated_and_required(web: tuple[TestClient, Settings]) -> None:
+def test_web_misp_url_is_validated_and_required(web: tuple[TestClient, Settings], monkeypatch) -> None:  # type: ignore[no-untyped-def]
     c, _ = web
     c.get("/api/ti")
     bad = c.post("/api/ti/config", json={"urls": {"misp": "http://misp.example.com"}})
     assert bad.status_code == 400 and "misp.example.com" not in bad.text  # el error no repite la URL
+    # Anti-SSRF: un host que el administrador no autorizó en TI_ALLOWED_HOSTS no se acepta desde la UI.
+    denied = c.post("/api/ti/config", json={"urls": {"misp": "https://misp.empresa.test/"}})
+    assert denied.status_code == 400 and "TI_ALLOWED_HOSTS" in denied.text
+    for metadata in ("http://169.254.169.254/", "https://[fe80::1]/"):
+        assert c.post("/api/ti/config", json={"urls": {"misp": metadata}}).status_code == 400
+    monkeypatch.setenv("TI_ALLOWED_HOSTS", "misp.empresa.test")
     r = c.post("/api/ti/config", json={"keys": {"misp": "misp-FAKE-0123456789abcdef0123"}})
     misp = next(s for s in r.json()["sources"] if s["id"] == "misp")
     assert misp["needs_url"] and misp["key_configured"] and not misp["usable"]  # clave sin URL: no utilizable

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from idor_ir.agents.schemas import ResponseAction
+from idor_ir.forensics.assessment import is_priority
 from idor_ir.forensics.integrity import atomic_write_text
 from idor_ir.profile import IncidentProfile
 
@@ -30,7 +31,7 @@ def _campaigns_for(action: ResponseAction, evidence: dict[str, Any]) -> list[dic
     ids = set(re.findall(r"\bC\d+\b", action.target))
     camps = evidence.get("campaigns", [])
     chosen = [c for c in camps if c["campaign_id"] in ids]
-    return chosen or [c for c in camps if c["status"] == "confirmada"]
+    return chosen or [c for c in camps if is_priority(c)]
 
 
 def _known_ips(evidence: dict[str, Any]) -> set[str]:
@@ -81,8 +82,37 @@ def _render(
             f"location = {prof.endpoint} {{ limit_req zone=idor burst=5 nodelay; }}\n"
         )
         return conf, ips
+    if t == "corroborate":
+        lines = [
+            "Solicitud de corroboración (el log HTTP no dice a quién pertenece cada objeto).",
+            "Sin estos datos la campaña es una HIPÓTESIS de alta confianza, no un IDOR demostrado.",
+            "",
+        ]
+        for c in camps:
+            imp = c.get("impact", {})
+            ranges = ", ".join(f"{a}–{b}" for a, b in imp.get("invoice_id_ranges_2xx", []))
+            lines += [
+                f"{c['campaign_id']}: {imp.get('unique_invoices_2xx', 0):,} {prof.object_param} con 2xx en {ranges}",
+                f"  1. Base de datos ({prof.object_label_plural}): exportar {prof.object_param}"
+                + (f", {prof.scope_param}" if prof.scope_param else "")
+                + ", titular  →  CSV para `idor-ir analyze --ownership`.",
+                f"  2. Logs de la aplicación de {prof.endpoint}: usuario autenticado y decisión de autorización "
+                "por objeto en el periodo de la campaña.",
+                f"  3. Proveedor de identidad: titular de cada credencial ({len(c.get('tokens', []))} huellas en "
+                "evidence.json) y sus sesiones/orígenes.",
+                "  4. Reproducción controlada: dos cuentas de prueba en un entorno aislado; la cuenta A pide un "
+                f"{prof.object_label} de la cuenta B.",
+            ]
+        return "\n".join(lines) + "\n", [c["campaign_id"] for c in camps]
     if t == "waf_rule":
-        uas = sorted({u["user_agent"] for c in camps for u in c["user_agents"] if u["category"] != "navegador_u_otro"})
+        # UA exclusivos del tráfico atribuido (dato del propio log); si no hay, los de herramientas conocidas.
+        exclusive = {
+            u["value"] for u in evidence.get("iocs", {}).get("user_agents", []) if u.get("exclusive_to_attack")
+        }
+        camp_uas = {u["user_agent"] for c in camps for u in c["user_agents"]}
+        uas = sorted(camp_uas & exclusive) or sorted(
+            {u["user_agent"] for c in camps for u in c["user_agents"] if u["category"] != "navegador_u_otro"}
+        )
         tokens = " ".join(re.escape(ua.split("/")[0].split(" ")[0]) for ua in uas)
         rule = (
             f'SecRule REQUEST_FILENAME "@streq {prof.endpoint}" "id:900101,phase:1,chain,deny,status:403,'

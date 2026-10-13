@@ -16,8 +16,9 @@ from typing import Any, ClassVar, Literal
 import httpx
 from pydantic import SecretStr
 
+from egress_guard import GuardedTransport
 from ti_gateway.models import IndicatorType, Level, SourceResult
-from ti_gateway.util import Pacer, describe_connection_error, scrub
+from ti_gateway.util import Pacer, describe_connection_error, egress_policy, scrub
 
 TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 HttpFactory = Callable[[], httpx.Client]
@@ -52,8 +53,12 @@ def default_http(verify: ssl.SSLContext | bool | None = None) -> httpx.Client:
     # `verify` permite una CA propia (instancias autoalojadas con PKI interna), nunca desactivar la verificación.
     if verify is None:
         verify = trust_context()
+    # Anti-SSRF: solo hosts de la lista blanca (APIs públicas fijas + TI_ALLOWED_HOSTS), IP verificada y fijada.
     return httpx.Client(
-        timeout=TIMEOUT, follow_redirects=False, headers={"User-Agent": "ti-gateway/0.1"}, verify=verify
+        timeout=TIMEOUT,
+        follow_redirects=False,
+        headers={"User-Agent": "ti-gateway/0.1"},
+        transport=GuardedTransport(egress_policy(), verify=verify),
     )
 
 

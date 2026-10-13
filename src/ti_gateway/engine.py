@@ -113,8 +113,13 @@ class Gateway:
         return result, True
 
     def lookup(
-        self, indicator: str, indicator_type: IndicatorType | None = None, sources: list[str] | None = None
+        self,
+        indicator: str,
+        indicator_type: IndicatorType | None = None,
+        sources: list[str] | None = None,
+        consent: dict[str, Any] | None = None,
     ) -> LookupResult:
+        """`consent`: autorización del envío (la herramienta MCP la exige; aquí se audita con la consulta)."""
         value, itype = normalize_indicator(indicator, indicator_type)  # lanza IndicatorError
         selected = sources or [p.id for p in self.providers.values() if p.enabled and p.configured]
         unknown = set(selected) - set(self.providers)
@@ -136,6 +141,7 @@ class Gateway:
                 "sent_to": sent,
                 "cached": [r.source for r in results if r.cached],
                 "verdict": verdict,
+                "consent": consent,
             },
         )
         return LookupResult(

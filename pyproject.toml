@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "idor-ir"
-version = "0.13.0"
+version = "0.14.0"
 description = "Investigación forense y respuesta automatizada ante incidentes IDOR, con agentes de GenAI y servidor MCP de inteligencia de amenazas"
 readme = "README.md"
 license = "MIT"
@@ -59,6 +59,7 @@ idor_ir = ["web/templates/*.html", "web/static/*.css", "web/static/*.js", "web/s
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["no_test_allowlist: sin los hosts de laboratorio autorizados por conftest (pruebas anti-SSRF)"]
 
 [tool.ruff]
 line-length = 120

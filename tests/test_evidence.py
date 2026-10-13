@@ -38,17 +38,28 @@ def test_evidence_end_to_end(synthetic_csv: Path, tmp_path: Path, monkeypatch: p
     ev = json.loads(raw)
 
     c1 = ev["campaigns"][0]
-    assert c1["campaign_id"] == "C1" and c1["status"] == "confirmada"
+    # Sin fuente de ownership: hipótesis de alta confianza, nunca «confirmada» ni IDOR demostrado.
+    assert c1["campaign_id"] == "C1" and c1["status"] == "alta_confianza"
+    assert c1["corroboration"]["status"] == "pendiente"
+    assert c1["signals"]["ip_nivel_critico"] and c1["signals"]["enumeracion_fuera_de_la_linea_base"]
+    assert ev["assessment"]["level"] == "hipótesis" and ev["assessment"]["limitations"]
     assert c1["ips"] == ["203.0.113.9"]
     assert c1["impact"]["unique_invoices_2xx"] == 900
     # Los IDs 2000-2399 nunca aparecen en el tráfico normal (que usa 1000-1999).
     assert c1["impact"]["invoice_id_ranges_outside_baseline"][-1][1] == 2399
     assert c1["impact"]["unique_invoices_2xx_outside_baseline"] >= 400
-    assert ev["incident_answers"]["2_evidencia_idor"]["respuesta"] == "Sí"
-    start = ev["incident_answers"]["1_inicio_explotacion"]
+    answers = ev["incident_answers"]
+    assert answers["2_evidencia_idor"]["respuesta"] == "Indicios fuertes, no demostrado"
+    assert "ownership" in answers["2_evidencia_idor"]["fundamento"]
+    start = answers["1_inicio"]
     assert start["ip_primer_acceso"] == "203.0.113.9" and isinstance(start["inicio_censurado"], bool)
-    assert start["primera_actividad_maliciosa"] <= start["primer_acceso_exitoso_2xx"]
-    assert ev["incident_answers"]["7_usuarios_potencialmente_afectados"]["limite_superior"] == 900
+    assert start["primera_actividad_sospechosa"] <= start["primer_acceso_exitoso_2xx"]
+    assert answers["3_alcance_exposicion"]["accesos_indebidos_confirmados"] is None
+    assert answers["3_alcance_exposicion"]["nivel"].startswith("exposición potencial")
+    assert answers["7_titulares_potencialmente_expuestos"]["limite_superior"] == 900
+    assert answers["7_titulares_potencialmente_expuestos"]["confirmados"] is None
+    for word in ("accedidas indebidamente", "IDOR confirmado", "IDOR demostrado:"):
+        assert word not in raw
     assert ev["top20_ips"][0]["ip"] == "203.0.113.9"
     assert any(u["value"] == "Scrapy/2.3.0" and u["exclusive_to_attack"] for u in ev["iocs"]["user_agents"])
     timeline = [e["ts"] for e in ev["timeline"]]

@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from idor_ir.forensics.assessment import is_priority, status_label
 from idor_ir.profile import IncidentProfile
 
 _JUDGEMENT = re.compile(
@@ -31,7 +32,7 @@ def _campaigns(evidence: dict[str, Any], question: str) -> list[dict[str, Any]]:
 
 
 def _status(c: dict[str, Any]) -> str:
-    return "confirmada" if c["status"] == "confirmada" else "por validar"
+    return status_label(c["status"])
 
 
 def _ips(c: dict[str, Any]) -> str:
@@ -60,7 +61,7 @@ def answer_from_evidence(question: str, evidence: dict[str, Any]) -> str | None:
 
     if re.search(rf"{_ASK}.*\bips?\b|\bips?\b.*\b(tiene|usa|usó|participa)", q, re.I):
         lines = [f"- {c['campaign_id']} ({_status(c)}): {len(c['ips'])} IPs — {_ips(c)}" for c in camps]
-        if any(c["status"] == "confirmada" for c in camps):
+        if any(is_priority(c) for c in camps):
             lines.append("- Las IPs de una campaña comparten credenciales: se contienen como una unidad.")
     elif re.search(r"\bcu[aá]ndo\b|\bfechas?\b|\bperiodo\b|\bper[ií]odo\b", q, re.I):
         rng = (evidence.get("metadata") or {}).get("dataset_range") or [None, None]

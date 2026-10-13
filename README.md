@@ -17,10 +17,11 @@ del objeto, la credencial y el ámbito.
 | Área | Qué hace |
 |---|---|
 | **Pipeline forense** | Ingesta por streaming con Polars (4,5 M filas en ~12 s en CPU), validación de esquema, SHA-256 del original, staging en Parquet y métricas (peticiones por IP, distribución temporal, 401/403 vs 200) |
-| **Detección** | Patrones IDOR (enumeración, rangos contiguos de IDs, volumen anómalo) por IP y por credencial, z-score robusto + Isolation Forest y *risk score* explicable de 0 a 100 |
-| **Evidencia** | Campañas, fases, *patient zero*, inicio de la explotación, Top 20 IPs con razones, timeline, IOCs (JSON y CSV), respuestas a las preguntas de análisis NIST y TTD |
+| **Detección** | Patrones IDOR (enumeración, rangos contiguos de IDs, volumen anómalo) por IP y por credencial, z-score robusto + Isolation Forest y *risk score* explicable de 0 a 100; atribución sin lista fija de user agents y pivote por credencial |
+| **Validación del detector** | `validate-detector`: banco sintético etiquetado con 5 estilos de ataque y tráfico legítimo difícil; precisión, recall, FPR, umbrales calibrados y línea base separada |
+| **Evidencia con rigor forense** | Escala señal → hipótesis → corroboración → impacto confirmado: con solo el log, el IDOR es una **hipótesis** y los conteos son **exposición potencial**; con una fuente de ownership (`--ownership`) se corrobora o descarta. Campañas, fases, *patient zero*, Top 20 IPs, timeline, IOCs, respuestas NIST y TTD |
 | **Integridad** | Manifiestos con el hash de cada artefacto y registro de custodia encadenado por hash; comando `verify` |
-| **Agentes GenAI** | Triage, Forensic Analyst y Response Advisor en LangGraph; política de aprobación en código, intervención humana, *dry-run*, registro de decisiones y mapeo MITRE ATT&CK validado contra el catálogo |
+| **Agentes GenAI** | Triage, Forensic Analyst y Response Advisor en LangGraph; política en código con evidencia mínima por acción (la notificación legal exige impacto confirmado), aprobación por rol, *dry-run*, ciclo recomendación → decisión → ejecución y mapeo MITRE ATT&CK validado contra el catálogo |
 | **LLM a elección** | Ollama (local o en la red), endpoints compatibles con OpenAI (LM Studio, vLLM) o APIs en la nube; sin LLM, lógica determinista equivalente |
 | **Inteligencia de amenazas** | Servidor MCP propio `ti-gateway`: VirusTotal, AlienVault OTX, AbuseIPDB, GreyNoise, IPinfo, Shodan, abuse.ch y MISP |
 | **Interfaz web** | FastAPI: carga segura de datasets, progreso en vivo, tableros, evidencia, aprobación de acciones, conversación con los agentes y evaluación de modelos |
@@ -34,10 +35,13 @@ Requisitos: Docker Engine o Docker Desktop con Compose v2.23+. Funciona en Linux
 git clone https://github.com/ycanon/ir-platform-idor.git
 cd ir-platform-idor
 cp .env.example .env                 # Windows (PowerShell): Copy-Item .env.example .env
+# Obligatorio (fail-closed): defina IRP_ACCESS_TOKEN en .env (>= 16 caracteres), p. ej. con
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+# Opcional: IRP_APPROVER_TOKEN (rol aprobador, distinto) para separar analista y aprobador.
 # Linux: que el contenedor pueda escribir en ./data y ./output con su usuario
 echo "IRP_UID=$(id -u)" >> .env && echo "IRP_GID=$(id -g)" >> .env
 
-docker compose up -d --build         # → http://127.0.0.1:8000
+docker compose up -d --build         # → http://127.0.0.1:8000 (inicie sesión con su nombre y el token)
 ```
 
 Copie el log a `data/` (o cárguelo desde la interfaz) y pulse **Analizar** en la pestaña *Dataset*.
@@ -71,7 +75,12 @@ python -m idor_ir enrich  --run <RUN_ID> --sources abuseipdb,otx                
 python -m idor_ir verify  --run <RUN_ID> --file data/three_months.csv                # integridad de un run
 python -m idor_ir llm-check                                                          # diagnóstico del LLM
 python -m idor_ir eval    --run <RUN_ID> --models qwen3:4b-instruct-2507-q4_K_M,qwen3:8b   # comparar modelos
+python -m idor_ir analyze --file data/three_months.csv --ownership data/ownership.csv    # corroborar con ownership
+python -m idor_ir validate-detector --seeds 3                                        # precisión/recall/FP del detector
 ```
+
+El CSV de ownership (exportación de la aplicación) tiene las columnas `<objeto>,[<ámbito>],owner` (p. ej.
+`invoice_id,site_id,owner`), donde `owner` es la credencial del titular. Sin él, el resultado es una hipótesis.
 
 `--detection-date` es opcional: sin ella, el TTD se estima hasta el último registro del log y se marca como estimado.
 El perfil del incidente se detecta solo; `--endpoint`, `--object-param`, `--scope-param` y `--token-param` permiten
@@ -151,9 +160,11 @@ hace una prueba de humo del contenedor.
 
 ## Seguridad
 
-La interfaz escucha solo en `127.0.0.1`, aplica CSP estricta, protección CSRF, validación de cargas y lista blanca de
-descargas; las claves de API viven solo en memoria y las acciones de contención nunca se ejecutan sobre sistemas
-reales (*dry-run*). Detalle de controles (OWASP Cheat Sheet Series) en [`docs/SPECS.md`](docs/SPECS.md#9-controles-de-seguridad).
+*Fail-closed*: sin token la interfaz solo escucha en `127.0.0.1`; fuera de ella exige `IRP_ACCESS_TOKEN`. Roles
+analista/aprobador con sesión firmada (cookie `Secure` por HTTPS), control de salida anti-SSRF con lista blanca y
+conexión fijada a la IP verificada (`egress_guard`), consentimiento obligatorio y auditado en el MCP de TI, CSP estricta,
+CSRF, validación de cargas y lista blanca de descargas; las claves de API viven solo en memoria y las acciones de
+contención nunca se ejecutan sobre sistemas reales (*dry-run*). Detalle de controles (OWASP Cheat Sheet Series) en [`docs/SPECS.md`](docs/SPECS.md#9-controles-de-seguridad).
 
 ## Licencia
 

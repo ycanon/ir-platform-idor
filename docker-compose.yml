@@ -19,7 +19,7 @@ services:
       args:
         # Imagen base fijada por versión. Puede reemplazarse por un espejo interno (registro corporativo).
         PYTHON_IMAGE: ${IRP_PYTHON_IMAGE:-python:3.12-slim-bookworm}
-    image: ir-platform:0.13.0
+    image: ir-platform:0.14.0
     container_name: irp
     env_file:
       - path: .env
@@ -28,6 +28,9 @@ services:
       # Rutas DENTRO del contenedor (prevalecen sobre IRP_DATA_DIR/IRP_OUTPUT_DIR del .env, pensadas para el venv).
       IRP_DATA_DIR: /data
       IRP_OUTPUT_DIR: /output
+      # Fail-closed: dentro del contenedor la app escucha en 0.0.0.0, así que exige token de acceso (>= 16 caracteres).
+      # Sin IRP_ACCESS_TOKEN en .env, `docker compose up` se detiene con este mensaje.
+      IRP_ACCESS_TOKEN: ${IRP_ACCESS_TOKEN:?Defina IRP_ACCESS_TOKEN en .env (ver .env.example)}
       # Ollama: el valor de .env si existe; si no, el Ollama del propio equipo. "localhost" no sirve dentro del contenedor.
       IRP_OLLAMA_BASE_URL: ${IRP_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
     extra_hosts:

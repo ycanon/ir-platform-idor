@@ -10,14 +10,20 @@ Flujo de `run_analysis`:
 5. Re-hash del original (no debe cambiar durante el análisis).
 6. Artefactos JSON + manifiesto de integridad + eventos de custodia.
 
-Datos sensibles: los tokens nunca se escriben completos en los artefactos de análisis; se usa
-huella (`tok_…`) + pista parcial. El mapa huella→token de los actores sospechosos se guarda aparte
-en `sensitive/token_map.json` porque es necesario para la revocación (acción de contención).
+Datos sensibles: los tokens nunca se escriben completos en los artefactos de análisis NI en el Parquet de
+staging: desde el staging se trabaja con la huella (`tok_…`) + pista parcial. El mapa huella→token de los actores
+sospechosos se guarda aparte en `sensitive/token_map.json` (permisos 0600, carpeta 0700) porque es necesario para
+la revocación (acción de contención).
+
+Corroboración (opcional): una fuente de ownership de la aplicación (`forensics/corroboration.py`) es lo único que
+puede convertir la hipótesis en impacto confirmado.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 import uuid
 from collections.abc import Callable
@@ -32,6 +38,7 @@ from idor_ir.config import Settings
 from idor_ir.detection import registered, traffic_metrics
 from idor_ir.detection.base import DetectionResult
 from idor_ir.detection.features import with_automation_flag
+from idor_ir.forensics.corroboration import OwnershipError, load_ownership
 from idor_ir.forensics.custody_intake import CustodyIntakeError, is_read_only, load_intake
 from idor_ir.forensics.evidence import build_evidence, iocs_to_csv
 from idor_ir.forensics.integrity import CustodyLog, FileFingerprint, IntegrityManifest, atomic_write_text, sha256_file
@@ -94,8 +101,20 @@ def resolve_incident_profile(source: Path, settings: Settings) -> tuple[Incident
     return IncidentProfile(**data), inference.as_dict()
 
 
+def restrict(path: Path, directory: bool = False) -> None:
+    """Solo el dueño: 0700 para carpetas sensibles, 0600 para archivos (en Windows no aplica: se ignora)."""
+    try:
+        os.chmod(path, stat.S_IRWXU if directory else stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
 def run_analysis(
-    source: Path, settings: Settings, detect: bool = True, on_progress: ProgressFn | None = None
+    source: Path,
+    settings: Settings,
+    detect: bool = True,
+    on_progress: ProgressFn | None = None,
+    ownership: Path | None = None,
 ) -> AnalysisResult:
     run_id = new_run_id()
     run_dir = settings.output_dir / run_id
@@ -182,7 +201,7 @@ def run_analysis(
         _write_json(run_dir / "custody_intake.json", intake, manifest, result)
 
     if detect:
-        _run_detection(source, settings, run_dir, manifest, result, progress, incident, inference)
+        _run_detection(source, settings, run_dir, manifest, result, progress, incident, inference, ownership, custody)
 
     progress("verify", "Re-verificando el hash del original")
     if sha256_file(source) != fingerprint.sha256:
@@ -204,6 +223,8 @@ def _run_detection(
     progress: ProgressFn = _noop,
     incident: IncidentProfile | None = None,
     inference: dict[str, Any] | None = None,
+    ownership: Path | None = None,
+    custody: CustodyLog | None = None,
 ) -> None:
     # 1) Staging columnar (streaming CSV -> Parquet).
     progress("staging", "Convirtiendo el CSV a Parquet (streaming)")
@@ -216,8 +237,28 @@ def _run_detection(
     )
     # La regex de automatización se evalúa sobre los user agents ÚNICOS (decenas) y se une por
     # hash join, en vez de evaluarla 4.5 M veces (medido en 2 vCPU: staging de 21,9 s a 7,9 s).
-    ua_flags = with_automation_flag(parsed.select("http_user_agent").unique()).collect(engine="streaming")
-    parsed.join(ua_flags.lazy(), on="http_user_agent", how="left", nulls_equal=True).sink_parquet(staged)
+    # Igual con las credenciales: se calcula la huella de cada token ÚNICO y el Parquet guarda solo la huella.
+    ua_unique, tok_unique = pl.collect_all(
+        [parsed.select("http_user_agent").unique(), parsed.select("authtoken").drop_nulls().unique()],
+        engine="streaming",
+    )
+    ua_flags = with_automation_flag(ua_unique.lazy()).collect()
+    raw_tokens = tok_unique["authtoken"].to_list()
+    fps = [fingerprint_token(t) for t in raw_tokens]
+    token_hints = {fp: token_hint(raw) for fp, raw in zip(fps, raw_tokens, strict=True)}
+    raw_by_fp = dict(zip(fps, raw_tokens, strict=True))
+    tok_df = pl.DataFrame(
+        {"authtoken": raw_tokens, "authtoken_fp": fps}, schema={"authtoken": pl.String, "authtoken_fp": pl.String}
+    )
+    (
+        parsed.join(ua_flags.lazy(), on="http_user_agent", how="left", nulls_equal=True)
+        .join(tok_df.lazy(), on="authtoken", how="left")
+        .drop("authtoken")
+        .rename({"authtoken_fp": "authtoken"})
+        .sink_parquet(staged)
+    )
+    restrict(staged.parent, directory=True)
+    restrict(staged)
     manifest.add_artifact(staged, base=run_dir)
     result.artifacts.append(str(staged.relative_to(run_dir)))
     result.timings["staging_s"] = round(time.perf_counter() - t, 2)
@@ -238,10 +279,27 @@ def _run_detection(
     result.timings["detection_s"] = round(time.perf_counter() - t, 2)
     manifest.parameters["detectors"] = {name: d.parameters for name, d in detections.items()}
 
-    report, token_map = _detection_report(detections)
+    report, token_map = _detection_report(detections, token_hints, raw_by_fp)
     _write_json(run_dir / "detection.json", report, manifest, result)
     if token_map:
+        (run_dir / "sensitive").mkdir(parents=True, exist_ok=True)
+        restrict(run_dir / "sensitive", directory=True)
         _write_json(run_dir / "sensitive" / "token_map.json", token_map, manifest, result)
+        restrict(run_dir / "sensitive" / "token_map.json")
+
+    # Corroboración opcional con una fuente de ownership de la aplicación.
+    own_df: pl.DataFrame | None = None
+    own_meta: dict[str, Any] | None = None
+    if ownership is not None:
+        try:
+            own_df = load_ownership(ownership, incident)
+        except OwnershipError as exc:
+            raise AnalysisError(str(exc)) from exc
+        own_fp = FileFingerprint.of(ownership)
+        own_meta = {"name": own_fp.name, "sha256": own_fp.sha256, "rows": own_df.height}
+        manifest.parameters["ownership_source"] = own_meta
+        if custody is not None:
+            custody.append("ownership_source_used", {"run_id": result.run_id, **own_meta})
     result.summary = {name: rep["summary"] for name, rep in report["detectors"].items()}
 
     # 4) Evidencia forense [R6, R7, R12] a partir del detector IDOR.
@@ -257,6 +315,9 @@ def _run_detection(
             dataset_end=result.profile.last_timestamp,
             detection_date=settings.detection_date,
             profile=incident,
+            token_hints=token_hints,
+            ownership=own_df,
+            ownership_meta=own_meta,
         )
         evidence["metadata"] = {
             "run_id": result.run_id,
@@ -278,8 +339,14 @@ def _run_detection(
         manifest.parameters["assumptions"] = evidence["assumptions"]
 
 
-def _detection_report(detections: dict[str, DetectionResult]) -> tuple[dict[str, Any], dict[str, str]]:
-    """Convierte los DataFrames puntuados en JSON, enmascarando tokens."""
+def _detection_report(
+    detections: dict[str, DetectionResult],
+    token_hints: dict[str, str] | None = None,
+    raw_by_fp: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Convierte los DataFrames puntuados en JSON. Los actores `authtoken` ya son huellas (staging)."""
+    hints = token_hints or {}
+    raws = raw_by_fp or {}
     token_map: dict[str, str] = {}
     out: dict[str, Any] = {"detectors": {}}
     for name, det in detections.items():
@@ -290,10 +357,11 @@ def _detection_report(detections: dict[str, DetectionResult]) -> tuple[dict[str,
             rows = df.head(TOP_IPS_IN_REPORT) if key == "source_ip" else df
             records = [_actor_record(r) for r in rows.iter_rows(named=True)]
             if key == "authtoken":
-                for rec, raw in zip(records, rows["actor"].to_list(), strict=True):
-                    fp = fingerprint_token(raw)
+                for rec, value in zip(records, rows["actor"].to_list(), strict=True):
+                    fp = value if value in hints else fingerprint_token(value)
+                    raw = raws.get(fp, value)
                     rec["actor"] = fp
-                    rec["token_hint"] = token_hint(raw)
+                    rec["token_hint"] = hints.get(fp) or token_hint(raw)
                     if rec["risk_level"] in SENSITIVE_LEVELS:
                         token_map[fp] = raw
             tables[key] = {"total_actors": df.height, "levels": levels, "actors": records}

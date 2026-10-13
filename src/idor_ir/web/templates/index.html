@@ -17,7 +17,8 @@
     <label class="run-select">Run
       <select id="run-select" aria-label="Seleccionar ejecución"></select>
     </label>
-    {% if auth %}<button id="logout" class="btn ghost small" type="button">Salir</button>{% endif %}
+    {% if auth %}<span class="muted small" title="Usuario y rol de la sesión">{{ who.user }} · {{ who.role.replace("_", " ") }}</span>
+    <button id="logout" class="btn ghost small" type="button">Salir</button>{% endif %}
   </div>
 </header>
 
@@ -103,6 +104,12 @@
           <input id="pf-detection_date" type="date"></label>
         <span class="muted small">Si se deja vacía, el TTD se <em>estima</em> hasta el último registro del log.</span>
       </div>
+      <div class="row detection-row">
+        <label>Fuente de corroboración (ownership) <span class="muted small">(opcional)</span>
+          <select id="pf-ownership"><option value="">— sin corroborar (solo log HTTP) —</option></select></label>
+        <span class="muted small">CSV de la aplicación con <code>objeto, [ámbito], owner</code>. Sin ella el resultado es
+          una <em>hipótesis</em>: el log no dice a quién pertenece cada objeto.</span>
+      </div>
       <div id="profile-detected" class="profile-detected" hidden></div>
       <details id="profile-box" class="profile-box">
         <summary>Ajustar el perfil manualmente (opcional)</summary>
@@ -180,6 +187,7 @@
       <p id="integrity" class="muted"></p>
       <ul id="verify-results" class="checks"></ul>
     </div>
+    <div id="assessment" class="card assessment" hidden></div>
     <div class="card"><h2>Respuestas del análisis (NIST · sección 3.1)</h2><div id="answers" class="answers"></div></div>
     <div class="card"><h2>Campañas</h2><div id="campaigns" class="grid two"></div></div>
     <div class="grid two">
@@ -241,7 +249,7 @@
       <p id="agents-msg" class="muted"></p>
     </div>
     <div id="agents-result" class="grid three"></div>
-    <div class="card"><h2>Acciones de contención</h2><div class="table-wrap"><table id="actions-table"></table></div></div>
+    <div class="card"><h2>Acciones de respuesta</h2><p id="actions-note" class="muted small"></p><div class="table-wrap"><table id="actions-table"></table></div></div>
     <div class="grid two">
       <div class="card"><h2>Mini-playbook</h2><ol id="playbook"></ol>
         <p class="row"><a id="dl-playbook" class="btn ghost small" href="#">playbook.md</a>

@@ -22,6 +22,23 @@ ROWS = [
 ]
 
 
+# Hosts "de laboratorio" que los tests usan como servidores propios (Ollama/LLM en la LAN, MISP). En producción el
+# administrador los autoriza con IRP_LLM_ALLOWED_HOSTS / TI_ALLOWED_HOSTS (control anti-SSRF, egress_guard).
+TEST_LLM_HOSTS = "10.0.0.5,10.0.0.20,mi-llm.example.com"
+TEST_TI_HOSTS = "misp.local,10.0.0.50,10.0.0.70,misp.comunidad.example"
+
+
+@pytest.fixture(autouse=True)
+def _egress_allowlist(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    from idor_ir.agents import providers
+    from idor_ir.config import Settings
+
+    if "no_test_allowlist" not in request.keywords:
+        monkeypatch.setenv("IRP_LLM_ALLOWED_HOSTS", TEST_LLM_HOSTS)
+        monkeypatch.setenv("TI_ALLOWED_HOSTS", TEST_TI_HOSTS)
+    providers.configure_egress(Settings())
+
+
 @pytest.fixture
 def sample_csv(tmp_path: Path) -> Path:
     path = tmp_path / "sample.csv"

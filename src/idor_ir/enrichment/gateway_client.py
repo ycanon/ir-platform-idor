@@ -68,6 +68,9 @@ class GatewayLaunch:
             env[f"TI_{source.upper()}_TLS_VERIFY"] = "0"
         # CA interna de instancias autoalojadas (ruta a un PEM, no es secreta) definida por el administrador.
         env |= {k: v for k, v in os.environ.items() if k.startswith("TI_") and k.endswith("_CA_BUNDLE") and v}
+        # Lista blanca de salida (anti-SSRF) definida por el administrador: el gateway la aplica en cada conexión.
+        if os.environ.get("TI_ALLOWED_HOSTS"):
+            env["TI_ALLOWED_HOSTS"] = os.environ["TI_ALLOWED_HOSTS"]
         command = self.command or [sys.executable, "-m", "ti_gateway"]
         return StdioServerParameters(command=command[0], args=command[1:], env=env)
 
@@ -91,8 +94,11 @@ class GatewaySession:
     async def list_sources(self) -> list[dict[str, Any]]:
         return list(await self._call("ti_list_sources"))
 
-    async def lookup(self, indicator: str, indicator_type: str | None, sources: list[str]) -> dict[str, Any]:
-        args: dict[str, Any] = {"indicator": indicator, "sources": sources}
+    async def lookup(
+        self, indicator: str, indicator_type: str | None, sources: list[str], consent: dict[str, Any]
+    ) -> dict[str, Any]:
+        """`consent`: {granted, run_id, granted_by, purpose}; el gateway rechaza la consulta sin él."""
+        args: dict[str, Any] = {"indicator": indicator, "sources": sources, "consent": consent}
         if indicator_type:
             args["indicator_type"] = indicator_type
         return dict(await self._call("ti_lookup", args))

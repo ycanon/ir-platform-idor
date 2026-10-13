@@ -74,8 +74,8 @@ el ciclo de NIST SP 800-61 como marco (detección y análisis → contención �
 | S1 | Formato del CSV | Separador `,`; el encabezado del dataset trae `http_staus` (sic) y se normaliza a `http_status`; codificación UTF-8 con o sin BOM |
 | S2 | Formato del `timestamp` | El dataset del reto usa **`AAAA-DD-MMTHH:MM`**, sin segundos ni zona horaria (segundo campo ∈ [1, 31], tercero ∈ [10, 12]). Es el valor por defecto (`%Y-%d-%mT%H:%M`); la autodetección como `AAAA-MM-DD` dejaba el 61 % de las filas sin fecha. Configurable con `IRP_TIMESTAMP_FORMAT` (o `auto`) |
 | S3 | Resolución temporal | Minuto: la automatización se mide en peticiones por minuto/día, no en intervalos de segundos |
-| S4 | Acceso «indebido» | El log no relaciona credencial, objeto y titular. Se infiere por comportamiento (enumeración de objetos, objetos fuera del tráfico normal, automatización) y se reporta como **estimación** [DEC] |
-| S5 | Usuarios afectados | Límite superior = IDs de objeto únicos con respuesta 2xx en campañas confirmadas, desglosado por ámbito (1 objeto = 1 titular potencial) [DEC] |
+| S4 | Acceso «indebido» | El log **no** contiene el titular de cada objeto, la identidad autenticada ni la decisión de autorización. Con él solo se sostiene una **hipótesis** (patrón compatible con IDOR); el acceso indebido se **demuestra** solo con una fuente de la aplicación (ownership, logs de autorización) — ver §5.5 [DEC] |
+| S5 | Titulares expuestos | Sin corroboración: **exposición potencial** = IDs de objeto únicos con 2xx en campañas priorizadas, por ámbito (1 objeto = 1 titular potencial, límite superior). Con ownership: objetos y titulares **confirmados** [DEC] |
 | S6 | Fecha de detección | El enunciado indica 12-ene-2020, anterior al log (oct–dic 2020). Para el caso de referencia se usa **12-ene-2021**, coherente con «periodo sospechoso: últimos 3 meses» [DEC]. No está fija: se indica por análisis (`--detection-date`, interfaz o `IRP_DETECTION_DATE`); sin ella el TTD se estima hasta el último registro y se marca como estimado |
 | S7 | TTR y TTC | El escenario no da fechas de respuesta: se estiman con supuestos explícitos (manual vs. automatizado); solo los tiempos de la plataforma son medidos |
 | S8 | Códigos 401/403 | El dataset no contiene 403; las métricas reportan 401, 403 y 4xx vs 2xx |
@@ -85,9 +85,9 @@ el ciclo de NIST SP 800-61 como marco (detección y análisis → contención �
 
 | Concepto | Definición implementada |
 |---|---|
-| IP sospechosa | Nivel de riesgo ≥ medio **y** ≥ 20 % de peticiones con user agent de herramienta |
-| Tráfico de ataque | Peticiones de IPs sospechosas con user agent de herramienta (el resto de esas IPs se trata como tráfico compartido) |
-| Campaña | Componente conexo del grafo IP↔credencial sobre el tráfico de ataque; **confirmada** si contiene una IP de nivel crítico, si no **por validar** |
+| IP sospechosa (señal) | Nivel de riesgo ≥ medio. El user agent es una *feature* del score, no un requisito |
+| Tráfico atribuido | (a) segmentos de IPs sospechosas cuyo user agent está **concentrado** (≥ 80 % de sus peticiones) en actores sospechosos, sin lista fija de herramientas; (b) si una IP sospechosa no tiene ningún segmento concentrado, todo su tráfico; (c) **pivote por credencial**: todo el tráfico de credenciales con riesgo ≥ alto, aunque venga de IPs que por sí solas no destacan (rotación de IPs) |
+| Campaña (hipótesis) | Componente conexo del grafo IP↔credencial sobre el tráfico atribuido. Estado: **alta confianza** si tiene un ancla (IP o credencial de nivel crítico) y ≥ 2 señales concordantes (enumeración fuera de la línea base, credenciales compartidas entre IPs, user agents exclusivos, volumen diario constante); si no, **por validar**. Con ownership: **corroborada** (hay 2xx entregados a quien no era titular) o **descartada** |
 | Fase | Tramo de la serie diaria; empieza una nueva cuando los 3 días siguientes duplican (o reducen a la mitad) la mediana de los 7 anteriores |
 | *Patient zero* | Primera petición de la campaña (hora, IP, credencial enmascarada, status, user agent); se marca como dato censurado si coincide con el inicio del log |
 | Inicio de la explotación | Primera respuesta 2xx de la campaña |
@@ -159,7 +159,10 @@ legible en la evidencia.
 | Modelo | 0–20 | Proporcional al *score* normalizado de Isolation Forest sobre las variables anteriores |
 
 Niveles: crítico, alto, medio, bajo. Isolation Forest es una señal más, no el decisor: sin datos etiquetados, un
-modelo complejo no sería auditable [DEC].
+modelo complejo no sería auditable [DEC]. En el análisis forense de un único log se ajusta y evalúa sobre los mismos
+actores (es un ranking relativo, no una probabilidad); para operación continua `score_actors(reference=…)` ajusta
+mediana/MAD e Isolation Forest en una ventana de línea base y evalúa fuera de muestra (§5.6). La intensidad de una
+credencial se normaliza por día activo, no por IP: dividir por IPs premiaba al atacante que rota IPs.
 
 ### 5.4 Perfil del incidente detectado del dataset
 
@@ -177,6 +180,62 @@ La plataforma no está atada al endpoint del caso de referencia. En una pasada s
   autenticado, falla de autorización»; si no, lo matiza.
 
 Probado con datasets sintéticos y con otro endpoint (`/orders/search?order_id&tenant&token`).
+
+### 5.5 Rigor forense: señal → hipótesis → corroboración → impacto [DEC]
+
+El log HTTP permite ver **qué pidió** cada credencial y **qué respondió** el servidor, pero no **a quién pertenece** cada
+objeto ni la decisión de autorización. Por eso la plataforma separa cuatro niveles y ningún artefacto (evidencia,
+agentes, interfaz, playbook) usa un nivel superior al alcanzado (`forensics/assessment.py`):
+
+| Nivel | Qué lo sostiene | Cómo se reporta |
+|---|---|---|
+| Señal | Actor con score ≥ medio | «actividad sospechosa» |
+| Hipótesis | Campaña con señales concordantes (§4) | «patrón compatible con IDOR», «exposición potencial (límite superior)» |
+| Corroboración | Fuente independiente de la aplicación: exportación de ownership (objeto → titular), logs de autorización, proveedor de identidad o reproducción controlada con dos cuentas de prueba | «corroborada» / «descartada» |
+| Impacto confirmado | Ownership cruzado petición por petición: 2xx entregados a una credencial que **no** era la del titular | objetos y titulares **confirmados** |
+
+**Corroboración con ownership** (`forensics/corroboration.py`): `analyze --ownership archivo.csv` (o el selector de la
+pestaña Dataset) recibe un CSV `objeto, [ámbito], owner`, donde `owner` es la credencial del titular (en producción, el
+titular del objeto unido con sus credenciales en el proveedor de identidad). Los titulares se comparan por huella
+(`tok_…`), nunca en claro. La fuente queda en el manifiesto (nombre, SHA-256, filas) y en la custodia
+(`ownership_source_used`). Resultado por campaña: 2xx autorizados (del propio titular), **no autorizados**, sin dato;
+objetos y titulares expuestos confirmados.
+
+**Respuesta condicionada a la evidencia**: cada acción declara la evidencia mínima que exige
+(`agents/policy.py`): monitoreo, *rate limit*, WAF y **solicitud de corroboración** → señal; bloqueo, revocación,
+rotación y fix → hipótesis; **notificación a Legal/Privacidad/titulares → impacto confirmado**. Si el run no alcanza ese
+nivel, la acción queda **condicionada** y no se ejecuta aunque se apruebe.
+
+### 5.6 Validación del detector (precisión, recall, falsos positivos) [DEC]
+
+El log del reto no tiene etiquetas, así que el score no puede medirse contra él. `idor-ir validate-detector`
+(`detection/validation.py`) genera un banco **sintético etiquetado** y mide el detector como se mediría con incidentes
+cerrados o un ejercicio de *red team*:
+
+- **Negativos**: usuarios con navegador sobre sus objetos, NAT corporativas (25 usuarios por IP), integraciones ERP con
+  cliente de API sobre un bloque propio y monitores (curl) sobre un mismo objeto.
+- **Positivos** (5 estilos): herramienta rápida y secuencial; navegador lento (40 IDs/día durante 4 semanas); 20 IPs
+  rotativas con una sola credencial; IDs aleatorios con navegador; herramienta con 60 % de rechazos 403.
+- **Variantes**: producción (Isolation Forest ajustado y evaluado sobre el mismo log), línea base separada (mediana/MAD
+  e Isolation Forest ajustados en OTRA ventana sin ataque y evaluados fuera de muestra), solo reglas, solo Isolation
+  Forest. Para cada una: TP/FP/FN/TN, precisión, recall, FPR y F1 por umbral (5–95), en los umbrales de nivel y el
+  menor umbral con FPR ≤ objetivo; recall por estilo y falsos positivos por tipo de tráfico.
+
+Resultados (3 semillas, umbral de señal = nivel medio):
+
+| Capa | Precisión | Recall | FPR | Lectura |
+|---|---|---|---|---|
+| Score por credencial | 0,33 | 1,00 | 1,8 % | Detecta los 5 estilos; los FP son automatización legítima (integraciones y monitores) |
+| Score por IP | 0,25 | 0,22 | 3,8 % | La rotación de IPs se diluye por IP (cada IP parece normal): por eso el pivote por credencial |
+| Score por IP con línea base separada | 0,51 | 0,69 | 3,8 % | Ajustar el modelo fuera de muestra mejora el recall al mismo FPR |
+| Campañas priorizadas (alta confianza) | 1,00 | 3 de 5 estilos | 0 campañas falsas | Los otros 2 estilos y 16 campañas de tráfico legítimo quedan «por validar» con solicitud de corroboración |
+
+Conclusiones: el score es **priorización**, no veredicto (ningún umbral logra FPR ≤ 1 % con recall útil); la precisión
+se obtiene en capas (grafo + señales concordantes + corroboración). La validación encontró dos puntos ciegos que se
+corrigieron: la normalización por IP escondía a la credencial que rota IPs, y la campaña no agrupaba esas IPs (pivote
+por credencial). El principal FP restante, integraciones legítimas, se controla con un inventario de cuentas de
+servicio. Límite: un banco sintético valida la mecánica; la calibración real exige etiquetas (incidentes, *red team*,
+ownership) y recalcular por endpoint.
 
 ## 6. Agentes de GenAI
 
@@ -199,9 +258,10 @@ fechas fuera del periodo del log. El diseño reparte responsabilidades:
    técnicas que la evidencia exige son obligatorias (fase con 0 % de éxito → T1595.002; 2xx con credencial → T1078;
    2xx en el endpoint expuesto → T1190; herramientas y volumen constante → T1119). La justificación debe corresponder
    a su técnica.
-2. **Acciones**: el código arma las candidatas (campaña confirmada → *rate limit*, WAF, bloqueo de IPs, revocación,
-   monitoreo y fix; por validar → solo validar con AppSec/QA; objetos expuestos → Legal/Privacidad) y el modelo las
-   ordena y justifica. Las obligatorias omitidas se agregan «por política».
+2. **Acciones**: el código arma las candidatas (campaña sin corroborar → solicitud de corroboración; campaña
+   priorizada → *rate limit*, WAF, bloqueo de IPs, revocación, monitoreo y fix; por validar → solo validar con
+   AppSec/QA; notificación a Legal/Privacidad condicionada a impacto confirmado) y el modelo las ordena y justifica.
+   Las obligatorias omitidas se agregan «por política».
 3. **Triage**: severidad mínima por regla (el modelo puede subirla, no bajarla), confianza calculada por el código e
    hipótesis rotuladas *hecho*/*hipótesis*.
 4. **Revisión automática** (`agents/review.py`): fechas fuera del periodo, IPs o campañas inexistentes, listas
@@ -218,6 +278,16 @@ Se automatiza solo lo **reversible, con riesgo de falso positivo bajo e impacto 
 WAF por user agent exclusivo del ataque, monitoreo). Bloqueo de IPs, revocación y rotación de credenciales, fix y
 notificaciones requieren aprobación humana. La política vive en el código: el modelo puede endurecerla, nunca
 relajarla. Una campaña «por validar» nunca se bloquea sin validación.
+
+Tres momentos distintos, registrados por separado en `action_lifecycle` del informe, en el playbook y en la interfaz:
+
+| Momento | Quién | Dónde queda |
+|---|---|---|
+| Recomendación automática | Agente (candidatas del código) o política | `recomendada_por`, `evidencia_requerida` |
+| Decisión | Automática (solo lo reversible y de bajo riesgo) o un usuario con rol **aprobador** | `decision`, `decidida_por` (usuario y rol de la sesión) y custodia `agents_completed` |
+| Ejecución | En el MVP solo *dry-run*: artefacto revisable, **no aplicado**; las acciones con evidencia insuficiente quedan **condicionadas** | `ejecucion`; `ejecucion_real: no soportada en el MVP` |
+
+La ejecución real (WAF, IdP, SOAR) sería un conector con su propia aprobación, idempotencia y registro de resultado.
 
 ### 6.4 Proveedores LLM
 
@@ -246,7 +316,9 @@ evidencia.
 
 Servidor MCP propio `ti-gateway` (`src/ti_gateway/`, sin dependencias de `idor_ir`, transporte stdio, `mcp>=1.28,<2`).
 Fuentes: VirusTotal, AlienVault OTX, AbuseIPDB, GreyNoise, IPinfo, Shodan, abuse.ch y MISP (autoalojado). Solo se
-consultan IPs públicas del Top 20, con autorización explícita por ejecución (VirusTotal publica lo consultado). Las
+consultan IPs públicas del Top 20, con autorización explícita por ejecución (VirusTotal publica lo consultado). La
+herramienta MCP `ti_lookup` **exige** un `consent` {granted, run_id, granted_by, purpose} y lo audita con cada consulta:
+ningún cliente MCP (tampoco un agente) puede consultar sin la autorización de una persona. Las
 claves llegan solo por entorno, con mínimo privilegio por operación; caché, cuota y auditoría encadenada son
 compartidas entre procesos. La reputación es la **actual**, no la de la fecha del incidente: es contexto, no prueba
 de atribución. Detalle en [`MCP.md`](MCP.md).
@@ -273,18 +345,20 @@ Referencia: OWASP Cheat Sheet Series.
 | *Path traversal* | Solo datasets listados en el directorio permitido; `run_id` validado por expresión regular y resolución de ruta | Input Validation |
 | XSS (los logs traen user agents y URIs del atacante) | Autoescape de Jinja2, CSP estricta sin scripts inline, nunca `\|safe` sobre datos del log | XSS Prevention |
 | Inyección de prompts vía el log | Al modelo solo llegan agregados; textos truncados y marcados como datos; sin herramientas | LLM Prompt Injection Prevention |
-| Exposición de credenciales del log | Enmascarado en evidencia, interfaz, logs y prompts; tokens completos solo en `sensitive/`, nunca servido | Secrets Management, Logging |
+| Exposición de credenciales del log | El Parquet de trabajo guarda solo la **huella** (`tok_…`), no el token; enmascarado en evidencia, interfaz, logs y prompts; tokens completos solo en `sensitive/` (0700/0600), nunca servido | Secrets Management, Logging |
 | API keys (LLM y TI) | Solo escritura y en memoria (`SecretStr`); la interfaz muestra `••••` + 4; formato validado; nunca en caché, artefactos ni custodia | Secrets Management |
-| Fuga de claves a terceros (SSRF) | URL fija por proveedor; URLs editables solo http(s) sin credenciales ni query, `http` solo hacia hosts privados; sin seguir redirecciones | SSRF Prevention, TLS |
+| SSRF (URLs de LLM y MISP) | Paquete `egress_guard`: lista blanca del administrador (`IRP_LLM_ALLOWED_HOSTS`, `TI_ALLOWED_HOSTS`; la UI no puede ampliarla) + hosts fijos del código; resolución DNS en **cada** conexión y verificación de **todas** las IPs (nunca link-local, metadatos de nube, multicast, reservadas); APIs públicas solo hacia IPs públicas; conexión **fijada** a la IP verificada (anti DNS rebinding; el nombre va en `Host` y SNI); sin redirecciones; URLs sin credenciales ni query | SSRF Prevention, TLS |
 | Errores verbosos | Mensaje genérico con ID de correlación; errores de proveedores limpiados de claves | Error Handling |
 | CSRF | *Double-submit* (cookie + cabecera `X-CSRF-Token`), `SameSite=Strict` | CSRF Prevention |
 | *Clickjacking* / *sniffing* | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `nosniff`, `Referrer-Policy` | HTTP Headers |
-| Acceso no autorizado | Escucha en `127.0.0.1`; token opcional `IRP_ACCESS_TOKEN` (comparación en tiempo constante, cookie HMAC `HttpOnly`); aviso si se expone sin token | Authentication, Session Management |
-| Envío de datos a terceros | Consentimiento por ejecución para LLM fuera de la red y para TI; solo contexto agregado o IPs públicas; registro en informe y custodia | Gobierno de datos |
+| Acceso no autorizado | **Fail-closed**: sin token solo escucha en `127.0.0.1`; fuera de ella `serve` no arranca sin `IRP_ACCESS_TOKEN` (≥ 16 caracteres) y Compose exige el token. Sesión firmada (HMAC-SHA256, clave aleatoria por proceso) con usuario, rol y vencimiento; `HttpOnly`, `SameSite=Strict`, `Secure` por HTTPS (TLS propio `--ssl-certfile/--ssl-keyfile` o proxy de `IRP_TRUSTED_PROXIES`) y HSTS | Authentication, Session Management |
+| Autorización (RBAC) | Rol **analista** (`IRP_ACCESS_TOKEN`): analizar, agentes, conversación local. Rol **aprobador** (`IRP_APPROVER_TOKEN`, distinto): aprobar acciones, cambiar proveedores LLM/TI, enviar datos a la nube o a TI. Sin token de aprobador: operador único (registrado así). Inicio de sesión, aprobaciones y autorizaciones con usuario y rol en la custodia | Authorization |
+| Envío de datos a terceros | Decisión del rol aprobador; consentimiento por ejecución para LLM fuera de la red y para TI; solo contexto agregado o IPs públicas; registro con usuario en informe y custodia | Gobierno de datos |
 | Acciones peligrosas | *Dry-run*, aprobación humana, rechazo por defecto, sin ejecución de comandos del sistema | — |
 | Contenedor | Sin root, solo lectura, sin capacidades, `no-new-privileges`, puertos solo en `127.0.0.1`, sin secretos en la imagen | Docker Security |
 | Lectura de métricas | `IRP_METRICS_TOKEN` de solo lectura; no autoriza otras rutas; secreto de Compose | Secrets Management |
-| Servidor MCP | Ninguna herramienta recibe ni devuelve claves; IPs privadas rechazadas; textos de terceros saneados; auditoría encadenada | MCP Security |
+| Servidor MCP | Ninguna herramienta recibe ni devuelve claves; `ti_lookup` exige consentimiento y lo audita; IPs privadas rechazadas; salida por `egress_guard`; textos de terceros saneados; auditoría encadenada | MCP Security |
+| Re-ejecución de agentes | Escritura en un directorio temporal y promoción atómica: un fallo conserva el informe anterior completo y queda `agents_failed` en la custodia | — |
 
 **Integridad**: SHA-256 del original antes de procesar; manifiesto con el hash de cada artefacto; registro de custodia
 (`output/custody_log.jsonl`) en el que cada evento incluye el hash del anterior; `idor-ir verify` recalcula todo.
@@ -310,9 +384,9 @@ para comprobar que la detección genérica encuentra lo que hay.
 | Hallazgo | Dato |
 |---|---|
 | Tráfico de base | 31 credenciales, ~5 700 IPs, user agents de navegador; consultan ~5 000 facturas en dos bloques de IDs |
-| Campaña confirmada (C1) | 4 credenciales usadas desde 5 IPs (malla completa), 61 961 peticiones, user agents de herramientas (Scrapy, crawler4j, wget) |
+| C1 · hipótesis de alta confianza (sin corroborar) | 4 credenciales usadas desde 5 IPs (malla completa), 61 961 peticiones, user agents de herramientas (Scrapy, crawler4j, wget); las 6 señales presentes |
 | Fases de C1 | Oct: 48 peticiones/día, 0 % de éxito · Nov: 504/día, primer 2xx el 2020-11-01 00:04 · Dic: 1 463/día, 94 % de éxito y rango de IDs ampliado |
-| Impacto de C1 | 48 827 respuestas 2xx, todas con credencial; 10 181 facturas distintas, 5 232 nunca consultadas por el tráfico normal |
+| Exposición potencial de C1 | 48 827 respuestas 2xx, todas con credencial; 10 181 facturas distintas (límite superior), 5 232 nunca consultadas por el tráfico normal. Sin ownership no se sabe cuántas eran de otro titular |
 | Actividad por validar (C2) | Herramienta de pruebas de API con credenciales de prueba desde una /24, solo en horario laboral y dentro del rango normal |
 | TTD | 103 días desde la primera actividad; 72 desde el primer acceso exitoso (detección: 12-ene-2021) |
 
@@ -320,7 +394,9 @@ para comprobar que la detección genérica encuentra lo que hay.
 
 - **Esquema**: supone los 8 campos del log del reto y un ID de objeto numérico en la query; las credenciales en
   cabeceras no aparecen en este formato.
-- **Afectados**: límite superior; la cifra exacta requiere cruzar los IDs con la base de datos de la aplicación.
+- **Impacto**: sin una fuente de la aplicación (ownership/autorización) el resultado es una hipótesis y una exposición
+  potencial (límite superior); el impacto confirmado requiere `--ownership`.
+- **Detector**: validado con un banco sintético (§5.6); la precisión en producción requiere etiquetas reales.
 - **TTR/TTC**: estimaciones con supuestos explícitos.
 - **Calidad del modelo**: la redacción y el criterio dependen del LLM; el banco de evaluación permite medirlo.
 - **Futuro**: detección en ventanas sobre un flujo (SIEM o Kafka), líneas base por cliente, nuevos detectores sobre el

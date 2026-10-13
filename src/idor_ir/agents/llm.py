@@ -161,6 +161,13 @@ class LLMClient(Protocol):
     def generate(self, system: str, user: str, schema: type[T], max_tokens: int) -> T: ...
 
 
+def _guarded() -> Any:
+    """Transporte con la política de salida (anti-SSRF). Import diferido: providers importa este módulo."""
+    from idor_ir.agents.providers import guarded_transport
+
+    return guarded_transport()
+
+
 class OllamaLLM:
     """Cliente para un servidor Ollama (local o en la red)."""
 
@@ -198,6 +205,7 @@ class OllamaLLM:
             format=ollama_schema(schema),
             keep_alive="30m",
             client_kwargs={"timeout": self.timeout_s},
+            sync_client_kwargs={"transport": _guarded()},
         )
 
     def generate(self, system: str, user: str, schema: type[T], max_tokens: int) -> T:
@@ -236,6 +244,7 @@ class OllamaLLM:
             num_ctx=self.num_ctx,
             keep_alive="30m",
             client_kwargs={"timeout": self.timeout_s},
+            sync_client_kwargs={"transport": _guarded()},
         )
         history = [("system", system)] + [("human" if m["role"] == "user" else "ai", m["content"]) for m in messages]
         parts: list[str] = []
@@ -290,7 +299,7 @@ class OllamaLLM:
         import httpx
 
         try:
-            response = httpx.get(f"{self.base_url}/api/tags", timeout=5.0)
-            return response.status_code == 200
-        except httpx.HTTPError:
+            with httpx.Client(transport=_guarded(), follow_redirects=False, timeout=5.0) as http:
+                return http.get(f"{self.base_url}/api/tags").status_code == 200
+        except (httpx.HTTPError, ValueError):  # ValueError: destino bloqueado por la política de salida
             return False

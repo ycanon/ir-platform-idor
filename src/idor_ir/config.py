@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     scope_label: str = Field(default="sitio", max_length=30)
 
     ollama_base_url: HttpUrl = HttpUrl("http://localhost:11434")
+    # Anti-SSRF: hosts PROPIOS que la UI puede usar como URL de LLM (Ollama en la LAN, API compatible con OpenAI).
+    # Además siempre: localhost, 127.0.0.1, ::1, host.docker.internal, ollama y el host de IRP_OLLAMA_BASE_URL.
+    # Las APIs en la nube con URL fija del código no necesitan estar aquí. La UI no puede ampliar esta lista.
+    llm_allowed_hosts: str = Field(default="", max_length=2000, pattern=r"^[A-Za-z0-9.,:_\-\[\] ]*$")
     ollama_model: str = Field(default="qwen3:4b-instruct-2507-q4_K_M", max_length=100)
     # Conversación con los agentes: proveedor y modelo PROPIOS, iguales o distintos a los de los agentes.
     # Vacío = el mismo de los agentes. Ej.: agentes con qwen3:8b local y chat con qwen3:4b, o agentes en Ollama
@@ -75,6 +79,14 @@ class Settings(BaseSettings):
     # Token de acceso opcional a la UI/API. Si se define, se exige inicio de sesión (cookie HttpOnly).
     # La app escucha solo en 127.0.0.1 por defecto; el token es una segunda barrera si se expone en red.
     access_token: SecretStr | None = None
+    # Token del rol APROBADOR (aprobar acciones, cambiar proveedores LLM/TI, autorizar salida de datos). Si no se
+    # define, el titular de IRP_ACCESS_TOKEN es "operador único" (ambos permisos, registrado así en la custodia).
+    approver_token: SecretStr | None = None
+    session_hours: int = Field(default=12, ge=1, le=168)
+    # Cookie Secure: None = automático (solo si la petición llega por HTTPS); True = siempre (detrás de TLS).
+    cookie_secure: bool | None = None
+    # IPs de proxies inversos de confianza (coma) cuyos X-Forwarded-Proto/For se aceptan. Vacío = ninguno.
+    trusted_proxies: str = Field(default="", max_length=400, pattern=r"^[0-9a-fA-F:.,/ *]*$")
     # Token de solo lectura para que Prometheus lea /metrics cuando hay IRP_ACCESS_TOKEN (perfil observabilidad).
     metrics_token: SecretStr | None = None
 
@@ -94,7 +106,16 @@ class Settings(BaseSettings):
     # (web: pestaña Dataset; CLI: --detection-date). Este valor es solo un predeterminado opcional (vacío = sin TTD).
     detection_date: datetime | None = None
 
-    @field_validator("access_token", "metrics_token", "vt_api_key", "otx_api_key", "detection_date", mode="before")
+    @field_validator(
+        "access_token",
+        "approver_token",
+        "metrics_token",
+        "vt_api_key",
+        "otx_api_key",
+        "detection_date",
+        "cookie_secure",
+        mode="before",
+    )
     @classmethod
     def _blank_token_is_none(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
@@ -172,3 +193,26 @@ def _parse_detection_date(text: str) -> datetime | None:
 def get_settings() -> Settings:
     """Devuelve una única instancia de configuración (se lee una vez por proceso)."""
     return Settings()
+
+
+# Variables sin prefijo IRP_ que también se leen del .env (pydantic-settings solo carga las IRP_ en Settings).
+# TI_ALLOWED_HOSTS la usan la plataforma y el gateway MCP desde el entorno del proceso.
+ENV_PASSTHROUGH = ("TI_ALLOWED_HOSTS",)
+
+
+def export_env_passthrough(env_file: Path | str = ".env") -> None:
+    """Copia al entorno del proceso las variables de ENV_PASSTHROUGH definidas en el .env (si no están ya definidas).
+
+    En Docker, Compose ya las pone en el entorno; en el entorno virtual solo existían si se definían en el sistema."""
+    import os
+
+    from dotenv import dotenv_values
+
+    path = Path(env_file)
+    if not path.is_file():
+        return
+    values = dotenv_values(path, encoding="utf-8")
+    for key in ENV_PASSTHROUGH:
+        value = values.get(key)
+        if value and not os.environ.get(key):
+            os.environ[key] = value

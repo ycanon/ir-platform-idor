@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from ti_gateway.models import IndicatorType
@@ -25,7 +25,33 @@ class BaseURLError(ValueError):
     """URL base de una fuente autoalojada (p. ej. MISP) inválida o insegura."""
 
 
-def validate_base_url(raw: str) -> str:
+# Hosts de las APIs públicas que el CÓDIGO consulta (no configurables). Deben resolver a IPs públicas.
+PUBLIC_API_HOSTS = frozenset(
+    {
+        "api.abuseipdb.com", "api.greynoise.io", "api.ipinfo.io", "api.shodan.io", "otx.alienvault.com",
+        "threatfox-api.abuse.ch", "urlhaus-api.abuse.ch", "www.virustotal.com",
+    }
+)  # fmt: skip
+TI_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+
+
+def egress_policy(env: Mapping[str, str] | None = None) -> Any:
+    """Política de salida del gateway: APIs públicas fijas + hosts propios de TI_ALLOWED_HOSTS (p. ej. MISP).
+
+    La lista la define el ADMINISTRADOR por entorno; la interfaz web no puede ampliarla."""
+    import os
+
+    from egress_guard import EgressPolicy, parse_hosts
+
+    source = os.environ if env is None else env
+    return EgressPolicy(
+        allowed_hosts=TI_LOCAL_HOSTS + parse_hosts(source.get("TI_ALLOWED_HOSTS", "")),
+        fixed_hosts=PUBLIC_API_HOSTS,
+        env_var="TI_ALLOWED_HOSTS",
+    )
+
+
+def validate_base_url(raw: str, policy: Any = None) -> str:
     """URL base de una instancia autoalojada (interna o externa).
 
     - `https://` hacia cualquier servidor: instancia interna (misp.example.internal) o externa (comunidad/proveedor).
@@ -54,6 +80,12 @@ def validate_base_url(raw: str) -> str:
         _ = parts.port  # valida el puerto
     except ValueError as exc:
         raise BaseURLError("Puerto inválido") from exc
+    from egress_guard import EgressError
+
+    try:
+        (policy or egress_policy()).check_url(value)  # anti-SSRF: el host debe estar autorizado por el administrador
+    except EgressError as exc:
+        raise BaseURLError(str(exc)) from None
     return value.rstrip("/")
 
 
