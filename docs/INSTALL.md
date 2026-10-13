@@ -26,7 +26,7 @@ Guía para ejecutar IR Platform en un entorno virtual de Python, sin Docker. Par
 Linux / macOS:
 
 ```bash
-git clone https://github.com/USUARIO/ir-platform-idor.git
+git clone https://github.com/ycanon/ir-platform-idor.git
 cd ir-platform-idor
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -38,7 +38,7 @@ cp .env.example .env
 Windows (PowerShell):
 
 ```powershell
-git clone https://github.com/USUARIO/ir-platform-idor.git
+git clone https://github.com/ycanon/ir-platform-idor.git
 cd ir-platform-idor
 py -3.12 -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # solo si PowerShell bloquea el script de activación
